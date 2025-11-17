@@ -6,12 +6,11 @@ import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
 import { AppSidebar } from "@/components/AppSidebar";
 import { WalletConnect } from "@/components/WalletConnect";
-import Dashboard from "./pages/Dashboard";
 import CreateMultisig from "./pages/CreateMultisig";
 import NewTransaction from "./pages/NewTransaction";
-import Transactions from "./pages/Transactions";
-import Settings from "./pages/Settings";
+import MultisigPage from "./pages/MultisigPage";
 import NotFound from "./pages/NotFound";
+import { MultisigDropdown } from "./components/MultisigDropdown";
 import { WalletProvider } from "@/context/WalletContext";
 import { EvmProvider } from "@/context/EvmContext";
 
@@ -30,17 +29,18 @@ const App = () => (
             <AppSidebar />
             <div className="flex-1 flex flex-col">
               <header className="h-16 border-b border-border bg-card flex items-center justify-between px-6 sticky top-0 z-10 shadow-sm">
-                <SidebarTrigger />
+                <div className="flex items-center gap-4">
+                  <SidebarTrigger />
+                  <MultisigDropdown />
+                </div>
                 <WalletConnect />
               </header>
               <main className="flex-1 p-8 overflow-auto">
                 <Routes>
-                  <Route path="/" element={<Dashboard />} />
-            <Route path="/create-multisig" element={<CreateMultisig />} />
-            <Route path="/new-transaction" element={<NewTransaction />} />
-            <Route path="/transactions" element={<Transactions />} />
-            <Route path="/settings" element={<Settings />} />
-            <Route path="*" element={<NotFound />} />
+                  <Route path="/multisig/:address" element={<MultisigPage />} />
+                  <Route path="/create-multisig" element={<CreateMultisig />} />
+                  <Route path="/new-transaction" element={<NewTransaction />} />
+                  <Route path="*" element={<NotFound />} />
                 </Routes>
               </main>
             </div>
