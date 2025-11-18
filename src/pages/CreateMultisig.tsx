@@ -18,7 +18,7 @@ export default function CreateMultisig() {
   const [threshold, setThreshold] = useState(1);
   const { toast } = useToast();
   const { walletAddress: userPublicKey, network } = useWallet();
-  const { createMultisig, createProposal } = useEvm();
+  const { createMultisig } = useEvm();
 
 
   const addSigner = () => {

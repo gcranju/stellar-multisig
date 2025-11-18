@@ -21,7 +21,7 @@ const menuItems = [
   { title: "Settings", url: "/settings", icon: Settings },
 ];
 
-export function AppSidebar() {
+export function AppSidebar({ address }: { address?: string }) {
   const { open } = useSidebar();
   const location = useLocation();
 
@@ -50,7 +50,7 @@ export function AppSidebar() {
                 <SidebarMenuItem key={item.title}>
                   <SidebarMenuButton asChild>
                     <NavLink
-                      to={item.url}
+                      to={"multisig/"+ address + item.url}
                       end={item.url === "/"}
                       className="flex items-center gap-3 hover:bg-sidebar-accent transition-colors"
                       activeClassName="bg-sidebar-accent text-sidebar-accent-foreground font-medium"

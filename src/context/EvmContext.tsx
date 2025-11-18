@@ -4,6 +4,16 @@ import { ethers } from "ethers";
 const CONTRACT_ADDRESS = "0x5f557aC4653E6dFc4616631683551aE4E0c073d3";
 import abi from "@/abi/StellarMultisigRegistry.json";
 
+interface Proposal {
+  proposalId: bigint;
+  xdr: string;
+  description: string;
+  executed: boolean;
+  executedTxHash: string;
+  createdAt: bigint;
+  isDeleted: boolean;
+}
+
 interface EvmContextType {
   walletAddress: string | null;
   contract: ethers.Contract | null;
@@ -13,17 +23,18 @@ interface EvmContextType {
     signers: string[],
     threshold: number
   ) => Promise<void>;
-  createProposal: (
+  createProposalEvm: (
     stellarAddress: string,
     xdr: string,
     description: string
   ) => Promise<number>;
-getMultisig: (stellarAddress: string) => Promise<{
+  getMultisig: (stellarAddress: string) => Promise<{
     name: string;
     threshold: number;
     signers: string[];
   } | null>;
-
+  getProposals: (stellarAddress: string) => Promise<Proposal[]>;
+  getProposal: (stellarAddress: string, proposalId: number) => Promise<Proposal | null>;
 }
 
 const EvmContext = createContext<EvmContextType | undefined>(undefined);
@@ -82,7 +93,7 @@ export const EvmProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  const createProposal = async (
+  const createProposalEvm = async (
     stellarAddress: string,
     xdr: string,
     description: string
@@ -100,21 +111,77 @@ export const EvmProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-const getMultisig = async (stellarAddress: string) => {
-  if (!contract) return null;
-  try {
-    const multisig = await contract.getMultisig(stellarAddress);
-    console.log("Fetched multisig from contract:", multisig.signers);
-    return {
-      name: multisig.name,
-      threshold: Number(multisig.threshold),
-      signers: multisig.signers,
-    };
-  } catch (error) {
-    console.error("Error fetching multisig:", error);
-    return null;
-  }
-};
+  const getMultisig = async (stellarAddress: string) => {
+    if (!contract) return null;
+    try {
+      const multisig = await contract.getMultisig(stellarAddress);
+      console.log("Fetched multisig from contract:", multisig.signers);
+      return {
+        name: multisig.name,
+        threshold: Number(multisig.threshold),
+        signers: multisig.signers,
+      };
+    } catch (error) {
+      console.error("Error fetching multisig:", error);
+      return null;
+    }
+  };
+
+  const getProposals = async (stellarAddress: string): Promise<Proposal[]> => {
+    if (!contract) return [];
+    try {
+      // Get all proposal IDs for this multisig
+      console.log("Fetching proposal IDs for:", stellarAddress);
+      const proposalList = await contract.getAllProposals(stellarAddress);
+      const proposals: Proposal[] = [];
+
+      for (const proposalData of proposalList) {
+        if (!proposalData.isDeleted) {
+          proposals.push({
+            proposalId: BigInt(proposalData.proposalId),
+            xdr: proposalData.xdr,
+            description: proposalData.description,
+            executed: proposalData.executed,
+            executedTxHash: proposalData.executedTxHash,
+            createdAt: BigInt(proposalData.createdAt),
+            isDeleted: proposalData.isDeleted,
+          });
+        }
+      }
+      console.log("Fetched proposal IDs:", proposals);
+      return proposals;
+    } catch (error) {
+      console.error("Error fetching proposals:", error);
+      return [];
+    }
+  };
+
+  const getProposal = async (
+    stellarAddress: string,
+    proposalId: number
+  ): Promise<Proposal | null> => {
+    if (!contract) return null;
+    try {
+      const proposalData = await contract.proposals(stellarAddress, proposalId);
+      
+      if (proposalData.isDeleted) {
+        return null;
+      }
+
+      return {
+        proposalId: BigInt(proposalData.proposalId),
+        xdr: proposalData.xdr,
+        description: proposalData.description,
+        executed: proposalData.executed,
+        executedTxHash: proposalData.executedTxHash,
+        createdAt: BigInt(proposalData.createdAt),
+        isDeleted: proposalData.isDeleted,
+      };
+    } catch (error) {
+      console.error("Error fetching proposal:", error);
+      return null;
+    }
+  };
 
   return (
     <EvmContext.Provider
@@ -122,8 +189,10 @@ const getMultisig = async (stellarAddress: string) => {
         walletAddress,
         contract,
         createMultisig,
-        createProposal,
+        createProposalEvm,
         getMultisig,
+        getProposals,
+        getProposal,
       }}
     >
       {children}
