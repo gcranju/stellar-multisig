@@ -1,4 +1,4 @@
-import { Home, List, Settings } from "lucide-react";
+import { Home, Send, List, Settings } from "lucide-react";
 import { NavLink } from "@/components/NavLink";
 import { useLocation } from "react-router-dom";
 import {
@@ -15,6 +15,7 @@ import {
 
 const menuItems = [
   { title: "Home", url: "/", icon: Home },
+  { title: "New Transaction", url: "/new-transaction", icon: Send },
   { title: "Transactions", url: "/transactions", icon: List },
   { title: "Settings", url: "/settings", icon: Settings },
 ];
@@ -22,6 +23,11 @@ const menuItems = [
 export function AppSidebar({ address }: { address?: string }) {
   const { open } = useSidebar();
   const location = useLocation();
+
+  // Don't show sidebar navigation on root dashboard
+  if (!address) {
+    return null;
+  }
 
   return (
     <Sidebar className="border-r border-border">
@@ -34,7 +40,7 @@ export function AppSidebar({ address }: { address?: string }) {
                 <SidebarMenuItem key={item.title}>
                   <SidebarMenuButton asChild>
                     <NavLink
-                      to={address ? `/multisig/${address}${item.url}` : item.url}
+                      to={`/multisig/${address}${item.url}`}
                       end={item.url === "/"}
                       className="flex items-center gap-3 hover:bg-sidebar-accent transition-colors"
                       activeClassName="bg-sidebar-accent text-sidebar-accent-foreground font-medium"
