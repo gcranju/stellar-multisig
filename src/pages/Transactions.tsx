@@ -149,7 +149,11 @@ export default function Transactions() {
                           </p>
                         </div>
                       </div>
-                      <Button variant="outline" className="gap-2">
+                      <Button 
+                        variant="outline" 
+                        className="gap-2"
+                        onClick={() => window.location.href = `/multisig/${address}/transactions/${proposal.proposalId}`}
+                      >
                         View Details
                         <ArrowRight className="w-4 h-4" />
                       </Button>
@@ -193,11 +197,13 @@ export default function Transactions() {
                     )}
                     
                     {proposal.executedTxHash && (
-                      <div className="flex items-center gap-2 text-sm">
-                        <span className="text-muted-foreground">Transaction Hash:</span>
-                        <code className="px-2 py-1 bg-muted rounded text-foreground font-mono">
-                          {proposal.executedTxHash.substring(0, 20)}...
-                        </code>
+                      <div className="space-y-2">
+                        <div className="flex items-center gap-2 text-sm">
+                          <span className="text-muted-foreground">Transaction Hash:</span>
+                          <code className="px-2 py-1 bg-muted rounded text-foreground font-mono">
+                            {proposal.executedTxHash.substring(0, 20)}...
+                          </code>
+                        </div>
                       </div>
                     )}
                   </div>
