@@ -1,11 +1,12 @@
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { useParams } from "react-router-dom";
+import { Skeleton } from "@/components/ui/skeleton";
+import { useNavigate, useParams } from "react-router-dom";
 import { useEvm } from "@/context/EvmContext";
 import { useEffect, useState } from "react";
-import { Clock, CheckCircle2, ArrowRight, Loader2 } from "lucide-react";
+import { Clock, CheckCircle2, ArrowRight, Plus } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
 interface Proposal {
@@ -18,199 +19,238 @@ interface Proposal {
   isDeleted: boolean;
 }
 
+interface MultisigData {
+  threshold: number;
+  signers: string[];
+}
+
 export default function Transactions() {
   const { address } = useParams();
+  const navigate = useNavigate();
   const { getMultisig, getProposals } = useEvm();
   const { toast } = useToast();
-  const [multisigData, setMultisigData] = useState<any>(null);
+  const [multisigData, setMultisigData] = useState<MultisigData | null>(null);
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    const fetchData = async () => {
-      if (!address) return;
+    if (!address) return;
+    let cancelled = false;
+    setIsLoading(true);
 
-      setIsLoading(true);
+    (async () => {
       try {
-        // Fetch multisig metadata
-        const metadata = await getMultisig(address);
-        if (metadata) {
-          setMultisigData(metadata);
-        }
-
-        // Fetch proposals
-        const proposalList = Array.from(await getProposals(address));
-        console.log("Proposals fetched:", proposalList);
-        setProposals(proposalList.reverse());
+        const [metadata, proposalList] = await Promise.all([
+          getMultisig(address),
+          getProposals(address),
+        ]);
+        if (cancelled) return;
+        if (metadata) setMultisigData(metadata);
+        setProposals(Array.from(proposalList).reverse());
       } catch (error) {
-        console.error("Error fetching data:", error);
+        if (cancelled) return;
         toast({
           title: "Error",
           description: "Failed to load multisig data",
           variant: "destructive",
         });
       } finally {
-        setIsLoading(false);
+        if (!cancelled) setIsLoading(false);
       }
-    };
+    })();
 
-    fetchData();
+    return () => {
+      cancelled = true;
+    };
   }, [address, getMultisig, getProposals, toast]);
 
-  const queuedProposals = proposals.filter(p => !p.executed);
-  const executedProposals = proposals.filter(p => p.executed);
-
-  const formatDate = (timestamp: number) => {
-    const date = new Date(timestamp * 1000);
-    const now = Date.now();
-    const diff = now - date.getTime();
-
-    const minutes = Math.floor(diff / 60000);
-    const hours = Math.floor(diff / 3600000);
-    const days = Math.floor(diff / 86400000);
-
-    if (minutes < 60) return `${minutes} minutes ago`;
-    if (hours < 24) return `${hours} hours ago`;
-    return `${days} days ago`;
-  };
-
-  if (isLoading) {
-    return (
-      <div className="flex items-center justify-center min-h-[400px]">
-        <Loader2 className="w-8 h-8 animate-spin text-muted-foreground" />
-      </div>
-    );
-  }
+  const queuedProposals = proposals.filter((p) => !p.executed);
+  const executedProposals = proposals.filter((p) => p.executed);
 
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-4xl font-bold text-foreground mb-2">
-          {"Multisig Transactions"}
-        </h1>
-        <p className="text-muted-foreground font-mono text-sm">{address}</p>
+    <div className="space-y-6 max-w-5xl mx-auto">
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div className="min-w-0">
+          <h1 className="text-3xl font-bold text-foreground mb-1">Transactions</h1>
+          <p className="text-muted-foreground font-mono text-sm break-all">{address}</p>
+        </div>
+        <Button
+          onClick={() => navigate(`/multisig/${address}/new-transaction`)}
+          className="gap-2"
+        >
+          <Plus className="w-4 h-4" />
+          New Transaction
+        </Button>
       </div>
 
       <Tabs defaultValue="queue" className="w-full">
-        <TabsList className="grid w-full grid-cols-2">
-          <TabsTrigger value="queue"> 
-            Queue {queuedProposals.length > 0 && `(${queuedProposals.length})`}
+        <TabsList className="grid w-full grid-cols-2 max-w-sm">
+          <TabsTrigger value="queue">
+            Queue {!isLoading && queuedProposals.length > 0 && `(${queuedProposals.length})`}
           </TabsTrigger>
           <TabsTrigger value="history">
-            History {executedProposals.length > 0 && `(${executedProposals.length})`}
+            History {!isLoading && executedProposals.length > 0 && `(${executedProposals.length})`}
           </TabsTrigger>
         </TabsList>
 
-        <TabsContent value="queue" className="space-y-4 mt-6">
-          {queuedProposals.length === 0 ? (
-            <Card className="shadow-md">
-              <CardContent className="text-center py-12 text-muted-foreground">
-                <Clock className="w-16 h-16 mx-auto mb-4 opacity-50" />
-                <p className="text-lg mb-2">No pending transactions</p>
-                <p className="text-sm">All transactions have been executed</p>
-              </CardContent>
-            </Card>
+        <TabsContent value="queue" className="space-y-3 mt-6">
+          {isLoading ? (
+            <ProposalSkeletons />
+          ) : queuedProposals.length === 0 ? (
+            <EmptyCard
+              icon={Clock}
+              title="No pending transactions"
+              body="All transactions have been executed"
+            />
           ) : (
             queuedProposals.map((proposal) => (
-              <Card key={proposal.proposalId} className="shadow-md hover:shadow-lg transition-shadow">
-                <CardHeader>
-                  <div className="flex items-start justify-between">
-                    <div className="flex-1">
-                      <div className="flex items-center gap-3 mb-2">
-                        <CardTitle className="text-xl">Proposal #{proposal.proposalId.toLocaleString()}</CardTitle>
-                        <Badge variant="secondary">Awaiting Execution</Badge>
-                      </div>
-                      <CardDescription>{formatDate(Number(proposal.createdAt.toString()))}</CardDescription>
-                    </div>
-                  </div>
-                </CardHeader>
-                <CardContent>
-                  <div className="space-y-4">
-                    {proposal.description && (
-                      <div className="p-3 bg-muted/50 rounded-lg">
-                        <p className="text-sm text-foreground">{proposal.description}</p>
-                      </div>
-                    )}
-
-                    <div className="space-y-2">
-                      <p className="text-xs text-muted-foreground font-semibold uppercase">Transaction XDR</p>
-                      <code className="block p-3 bg-muted rounded text-xs font-mono break-all">
-                        {proposal.xdr.substring(0, 100)}...
-                      </code>
-                    </div>
-
-                    <div className="flex items-center justify-between p-4 bg-muted/50 rounded-lg">
-                      <div className="flex items-center gap-2">
-                        <Clock className="w-5 h-5 text-warning" />
-                        <div>
-                          <p className="font-semibold text-sm">Ready for execution</p>
-                          <p className="text-xs text-muted-foreground">
-                            Requires {multisigData?.threshold} signatures
-                          </p>
-                        </div>
-                      </div>
-                      <Button
-                        variant="outline"
-                        className="gap-2"
-                        onClick={() => window.location.href = `/multisig/${address}/transactions/${proposal.proposalId}`}
-                      >
-                        View Details
-                        <ArrowRight className="w-4 h-4" />
-                      </Button>
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
+              <ProposalCard
+                key={proposal.proposalId.toString()}
+                proposal={proposal}
+                threshold={multisigData?.threshold}
+                onView={() =>
+                  navigate(`/multisig/${address}/transactions/${proposal.proposalId}`)
+                }
+              />
             ))
           )}
         </TabsContent>
 
-        <TabsContent value="history" className="space-y-4 mt-6">
-          {executedProposals.length === 0 ? (
-            <Card className="shadow-md">
-              <CardContent className="text-center py-12 text-muted-foreground">
-                <CheckCircle2 className="w-16 h-16 mx-auto mb-4 opacity-50" />
-                <p className="text-lg mb-2">No transaction history</p>
-                <p className="text-sm">Executed transactions will appear here</p>
-              </CardContent>
-            </Card>
+        <TabsContent value="history" className="space-y-3 mt-6">
+          {isLoading ? (
+            <ProposalSkeletons />
+          ) : executedProposals.length === 0 ? (
+            <EmptyCard
+              icon={CheckCircle2}
+              title="No transaction history"
+              body="Executed transactions will appear here"
+            />
           ) : (
             executedProposals.map((proposal) => (
-              <Card key={proposal.proposalId} className="shadow-md">
-                <CardHeader>
-                  <div className="flex items-start justify-between">
-                    <div className="flex-1">
-                      <div className="flex items-center gap-3 mb-2">
-                        <CardTitle className="text-xl">Proposal #{proposal.proposalId.toLocaleString()}</CardTitle>
-                        <Badge variant="default">Executed</Badge>
-                      </div>
-                      <CardDescription>{formatDate(Number(proposal.createdAt.toString()))}</CardDescription>
-                    </div>
-                  </div>
-                </CardHeader>
-                <CardContent>
-                  <div className="space-y-4">
-                    {proposal.description && (
-                      <div className="p-3 bg-muted/50 rounded-lg">
-                        <p className="text-sm text-foreground">{proposal.description}</p>
-                      </div>
-                    )}
-
-                    {proposal.executedTxHash && (
-                      <div className="flex items-center gap-2 text-sm">
-                        <span className="text-muted-foreground">Transaction Hash:</span>
-                        <code className="px-2 py-1 bg-muted rounded text-foreground font-mono">
-                          {proposal.executedTxHash.substring(0, 20)}...
-                        </code>
-                      </div>
-                    )}
-                  </div>
-                </CardContent>
-              </Card>
+              <ExecutedProposalCard key={proposal.proposalId.toString()} proposal={proposal} />
             ))
           )}
         </TabsContent>
       </Tabs>
     </div>
+  );
+}
+
+function formatRelativeTime(timestamp: number) {
+  const date = new Date(timestamp * 1000);
+  const diff = Date.now() - date.getTime();
+  const minutes = Math.floor(diff / 60000);
+  const hours = Math.floor(diff / 3600000);
+  const days = Math.floor(diff / 86400000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? "" : "s"} ago`;
+  if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+  return `${days} day${days === 1 ? "" : "s"} ago`;
+}
+
+function ProposalCard({
+  proposal,
+  threshold,
+  onView,
+}: {
+  proposal: Proposal;
+  threshold?: number;
+  onView: () => void;
+}) {
+  return (
+    <Card className="hover:border-primary/40 transition-colors cursor-pointer" onClick={onView}>
+      <CardContent className="pt-6">
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex-1 min-w-0 space-y-2">
+            <div className="flex items-center gap-2 flex-wrap">
+              <h3 className="font-semibold">
+                Proposal #{proposal.proposalId.toLocaleString()}
+              </h3>
+              <Badge variant="secondary">Awaiting Execution</Badge>
+            </div>
+            {proposal.description && (
+              <p className="text-sm text-muted-foreground line-clamp-2">{proposal.description}</p>
+            )}
+            <div className="flex items-center gap-3 text-xs text-muted-foreground">
+              <span>{formatRelativeTime(Number(proposal.createdAt))}</span>
+              {threshold !== undefined && <span>· Requires {threshold} signatures</span>}
+            </div>
+          </div>
+          <Button variant="ghost" size="sm" className="gap-1 shrink-0">
+            View
+            <ArrowRight className="w-4 h-4" />
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function ExecutedProposalCard({ proposal }: { proposal: Proposal }) {
+  return (
+    <Card>
+      <CardContent className="pt-6">
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div className="flex-1 min-w-0 space-y-2">
+            <div className="flex items-center gap-2 flex-wrap">
+              <h3 className="font-semibold">
+                Proposal #{proposal.proposalId.toLocaleString()}
+              </h3>
+              <Badge variant="default" className="gap-1">
+                <CheckCircle2 className="w-3 h-3" />
+                Executed
+              </Badge>
+            </div>
+            {proposal.description && (
+              <p className="text-sm text-muted-foreground">{proposal.description}</p>
+            )}
+            <p className="text-xs text-muted-foreground">
+              {formatRelativeTime(Number(proposal.createdAt))}
+            </p>
+            {proposal.executedTxHash && (
+              <code className="block text-xs font-mono text-muted-foreground break-all">
+                {proposal.executedTxHash}
+              </code>
+            )}
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function EmptyCard({
+  icon: Icon,
+  title,
+  body,
+}: {
+  icon: React.ComponentType<{ className?: string }>;
+  title: string;
+  body: string;
+}) {
+  return (
+    <Card>
+      <CardContent className="text-center py-12 text-muted-foreground">
+        <Icon className="w-12 h-12 mx-auto mb-3 opacity-50" />
+        <p className="text-base text-foreground mb-1">{title}</p>
+        <p className="text-sm">{body}</p>
+      </CardContent>
+    </Card>
+  );
+}
+
+function ProposalSkeletons() {
+  return (
+    <>
+      {Array.from({ length: 3 }).map((_, i) => (
+        <Card key={i}>
+          <CardContent className="pt-6 space-y-3">
+            <Skeleton className="h-5 w-48" />
+            <Skeleton className="h-4 w-full" />
+            <Skeleton className="h-3 w-32" />
+          </CardContent>
+        </Card>
+      ))}
+    </>
   );
 }

@@ -1,5 +1,7 @@
 {
   "rewrites": [
+    { "source": "/sonic-rpc", "destination": "https://rpc.testnet.soniclabs.com/" },
+    { "source": "/sonic-rpc/(.*)", "destination": "https://rpc.testnet.soniclabs.com/$1" },
     { "source": "/(.*)", "destination": "/index.html" }
   ]
 }

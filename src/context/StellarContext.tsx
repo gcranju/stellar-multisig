@@ -106,9 +106,6 @@ export const StellarProvider: React.FC<{ children: React.ReactNode }> = ({
 
         const jsonSchema = client.spec?.jsonSchema?.() ?? null;
 
-        console.log("Fetched contract client", client);
-        console.log("JSON Schema:", jsonSchema);
-
         return { client, jsonSchema };
     };
 
@@ -242,9 +239,6 @@ export const StellarProvider: React.FC<{ children: React.ReactNode }> = ({
         const contract = new Contract(contractId);
         const params = buildParams(args, methodSchema);
 
-        console.log(`Calling method: ${functionName}`);
-        console.log("Parameters:", params);
-
         const operation = contract.call(functionName, ...params);
 
         const now = Math.floor(Date.now() / 1000);
@@ -318,14 +312,13 @@ export const StellarProvider: React.FC<{ children: React.ReactNode }> = ({
 
                 try {
                     const statusResponse = await server.getTransaction(result.hash);
-                    console.log("Transaction status response:", statusResponse);
                     if (statusResponse.status === "SUCCESS") {
                         return { success: true, result: statusResponse };
                     } else if (statusResponse.status === "FAILED") {
                         throw new Error(`Stellar transaction failed: ${JSON.stringify(statusResponse)}`);
                     }
                 } catch (err) {
-                    console.log("Error querying tx status or retrying...", err);
+                    console.warn("Error querying tx status, retrying", err);
                 }
             }
 
@@ -389,21 +382,14 @@ export const StellarProvider: React.FC<{ children: React.ReactNode }> = ({
             throw new Error("Wallet not connected");
         }
 
-        console.log(sign)
-
         let signedTxXdr = xdr;
         try {
             if (sign) {
-                // This will throw if signing failed or user cancelled
                 signedTxXdr = await signProposal({ multisigAddress, proposalId, signer, xdr });
             }
 
-            // Submit to Stellar network (this throws on failure)
             const { success, result } = await submitAndCheckTransaction(signedTxXdr);
 
-            console.log("Stellar transaction executed successfully:", result);
-
-            // Only mark executed after successful on-chain confirmation
             if (success && result && result.txHash) {
                 await markProposalExecuted(multisigAddress, proposalId, result.txHash);
             }
@@ -430,10 +416,7 @@ export const StellarProvider: React.FC<{ children: React.ReactNode }> = ({
             throw new Error("Wallet not connected");
         }
 
-        console.log("Creating proposal for function:", functionName, "with args:", args);
-
         try {
-            // Build the contract invocation transaction (unsigned)
             const tx = await buildInvokeTx({
                 contractId,
                 functionName,
@@ -442,27 +425,19 @@ export const StellarProvider: React.FC<{ children: React.ReactNode }> = ({
                 schema,
             });
 
-            console.log("Built transaction (unsigned):", tx.toXDR());
-
-            // Simulate to get resource fees / footprint
             const simulated = await server.simulateTransaction(tx);
             if (rpc.Api.isSimulationError(simulated)) {
                 throw new Error(`Simulation failed: ${simulated.error}`);
             }
 
-            // Prepare transaction with footprint from simulation
             const preparedTx = rpc.assembleTransaction(tx, simulated).build();
             const txXdr = preparedTx.toXDR();
 
-            console.log("Prepared transaction XDR:", txXdr);
-
-            // Safe sign - if this fails (user cancelled / wallet error) we do NOT commit anything
             let signedXdr: string;
             try {
                 signedXdr = await safeSignTransaction(txXdr);
             } catch (signErr) {
-                console.log("Signing aborted or failed. Not committing proposal to EVM.");
-                throw signErr; // caller can catch and show appropriate UX
+                throw signErr;
             }
 
             // Validate signed transaction via simulation (lightweight check) BEFORE committing to EVM
@@ -501,8 +476,6 @@ export const StellarProvider: React.FC<{ children: React.ReactNode }> = ({
         if (!walletAddress) {
             throw new Error("Wallet not connected");
         }
-
-        console.log(`Creating signer-update proposal for account ${source}`);
 
         try {
             const account = await server.getAccount(source);
@@ -551,21 +524,10 @@ export const StellarProvider: React.FC<{ children: React.ReactNode }> = ({
             }
 
             const tx = txBuilder.build();
-
-            // Simulate to prepare footprint
             const txXdr = tx.toXDR();
-            console.log("Prepared TX for signer update:", txXdr);
 
-            // Safe sign
-            let signedXdr: string;
-            try {
-                signedXdr = await safeSignTransaction(txXdr);
-            } catch (signErr) {
-                console.log("Signing aborted or failed. Not committing signer-update to EVM.");
-                throw signErr;
-            }
+            const signedXdr = await safeSignTransaction(txXdr);
 
-            // Commit to EVM
             await createProposalEvm(source, signedXdr, "update_signers", walletAddress);
 
             return {
@@ -593,8 +555,6 @@ export const StellarProvider: React.FC<{ children: React.ReactNode }> = ({
         if (!walletAddress) {
             throw new Error("Wallet not connected");
         }
-
-        console.log(`Creating threshold-update proposal for account ${source} -> ${threshold}`);
 
         try {
             const account = await server.getAccount(source);
@@ -629,21 +589,10 @@ export const StellarProvider: React.FC<{ children: React.ReactNode }> = ({
             const preparedTx = rpc.assembleTransaction(tx, simulated).build();
             const txXdr = preparedTx.toXDR();
 
-            console.log("Prepared TX for threshold update:", txXdr);
+            const signedXdr = await safeSignTransaction(txXdr);
 
-            // Safe sign
-            let signedXdr: string;
-            try {
-                signedXdr = await safeSignTransaction(txXdr);
-            } catch (signErr) {
-                console.log("Signing aborted or failed. Not committing threshold-update to EVM.");
-                throw signErr;
-            }
-
-            // Validate signed transaction via simulation BEFORE committing to EVM
             await simulateTransaction(signedXdr);
 
-            // Commit to EVM
             await createProposalEvm(source, signedXdr, `update_threshold_${threshold}`, walletAddress);
 
             return {

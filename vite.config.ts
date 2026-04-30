@@ -8,6 +8,14 @@ export default defineConfig(({ mode }) => ({
   server: {
     host: "::",
     port: 8081,
+    proxy: {
+      "/sonic-rpc": {
+        target: "https://rpc.testnet.soniclabs.com",
+        changeOrigin: true,
+        secure: true,
+        rewrite: (p) => p.replace(/^\/sonic-rpc/, "/"),
+      },
+    },
   },
   plugins: [react(), mode === "development" && componentTagger()].filter(Boolean),
   resolve: {

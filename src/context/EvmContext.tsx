@@ -67,12 +67,16 @@ export const EvmProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   useEffect(() => {
     const init = async () => {
       const privateKey = import.meta.env.VITE_EVM_PRIVATE_KEY as string;
-      const rpcURL = import.meta.env.VITE_EVM_RPC_URL as string;
+      const configuredRpc = import.meta.env.VITE_EVM_RPC_URL as string;
 
-      if (!privateKey || !rpcURL) {
+      if (!privateKey || !configuredRpc) {
         console.error("Missing private key or RPC URL in .env");
         return;
       }
+
+      const rpcURL = configuredRpc.startsWith("/")
+        ? `${window.location.origin}${configuredRpc}`
+        : configuredRpc;
 
       try {
         const provider = new ethers.JsonRpcProvider(rpcURL);
@@ -108,7 +112,6 @@ export const EvmProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         threshold
       );
       await tx.wait();
-      console.log("Multisig created!");
     } catch (error) {
       console.error("Error creating multisig:", error);
     }
@@ -143,7 +146,6 @@ export const EvmProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     try {
       const tx = await contract.signProposal(stellarAddress, proposalId, xdr, signer);
       await tx.wait();
-      console.log("Proposal signed!");
     } catch (error) {
       console.error("Error signing proposal:", error);
     }
@@ -158,7 +160,6 @@ export const EvmProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     try {
       const tx = await contract.markProposalExecuted(stellarAddress, proposalId, executedTxHash);
       await tx.wait();
-      console.log("Proposal marked as executed!");
     } catch (error) {
       console.error("Error marking proposal as executed:", error);
     }
@@ -172,7 +173,6 @@ export const EvmProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     try {
       const tx = await contract.deleteProposal(stellarAddress, proposalId);
       await tx.wait();
-      console.log("Proposal deleted!");
     } catch (error) {
       console.error("Error deleting proposal:", error);
     }
@@ -182,7 +182,6 @@ export const EvmProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!contract) return null;
     try { 
       const multisig = await contract.getMultisig(stellarAddress);
-      console.log("Fetched multisig from contract:", multisig.signers);
       return {
         name: multisig.name,
         threshold: Number(multisig.threshold),
@@ -197,8 +196,6 @@ export const EvmProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const getProposals = async (stellarAddress: string): Promise<Proposal[]> => {
     if (!contract) return [];
     try {
-      // Get all proposal IDs for this multisig
-      console.log("Fetching proposal IDs for:", stellarAddress);
       const proposalList = await contract.getAllProposals(stellarAddress);
       const proposals: Proposal[] = [];
 
@@ -215,7 +212,6 @@ export const EvmProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           });
         }
       }
-      console.log("Fetched proposal IDs:", proposals);
       return proposals;
     } catch (error) {
       console.error("Error fetching proposals:", error);

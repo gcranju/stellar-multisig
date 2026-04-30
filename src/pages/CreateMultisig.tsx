@@ -3,22 +3,21 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { PlusCircle, X } from "lucide-react";
+import { Loader2, PlusCircle, X } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { useWallet } from "@/context/WalletContext";
 import { useEvm } from "@/context/EvmContext";
-import { Networks, Horizon, Keypair, TransactionBuilder, BASE_FEE, Operation } from "stellar-sdk";
-import {
-  signTransaction,
-} from "@stellar/freighter-api";
+import { Horizon, Keypair, TransactionBuilder, BASE_FEE, Operation } from "stellar-sdk";
+import { signTransaction } from "@stellar/freighter-api";
 import { useNavigate } from "react-router-dom";
 
 export default function CreateMultisig() {
   const [name, setName] = useState("");
   const [signers, setSigners] = useState<string[]>([""]);
   const [threshold, setThreshold] = useState(1);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const { toast } = useToast();
-  const { walletAddress: userPublicKey, network, networkPassphrase } = useWallet();
+  const { walletAddress: userPublicKey, networkPassphrase } = useWallet();
   const { createMultisig } = useEvm();
   const navigate = useNavigate();
 
@@ -75,18 +74,15 @@ export default function CreateMultisig() {
       return;
     }
 
+    setIsSubmitting(true);
     try {
-      console.log(network);
       const horizonUrl = import.meta.env.VITE_HORIZON_URL;
-
       const server = new Horizon.Server(horizonUrl);
 
-      // 1. Generate new multisig account keypair
       const multisigKeypair = Keypair.random();
       const multisigPublicKey = multisigKeypair.publicKey();
-      // 2. Load user's Freighter wallet public key
       const userAccount = await server.loadAccount(userPublicKey);
-      // 3. Create funding transaction
+
       const fundTx = new TransactionBuilder(userAccount, {
         fee: BASE_FEE,
         networkPassphrase,
@@ -94,98 +90,73 @@ export default function CreateMultisig() {
         .addOperation(
           Operation.createAccount({
             destination: multisigPublicKey,
-            startingBalance: (1.5 + 0.5 * validSigners.length).toString(), // Minimum 1 XLM, plus safety buffer
+            startingBalance: (1.5 + 0.5 * validSigners.length).toString(),
           })
         )
         .setTimeout(180)
         .build();
 
-      // 4. Ask user to sign the funding transaction via Freighter
-      const signedFundXDR = await signTransaction(
-        fundTx.toXDR(),{ networkPassphrase }
-      ).then((signedXDR) => signedXDR.signedTxXdr,
+      const signedFundXDR = await signTransaction(fundTx.toXDR(), {
+        networkPassphrase,
+      }).then((signedXDR) => signedXDR.signedTxXdr);
+
+      await server.submitTransaction(
+        TransactionBuilder.fromXDR(signedFundXDR, networkPassphrase),
       );
-      
-      console.log("Signed Funding XDR:", signedFundXDR);
-      await server.submitTransaction(TransactionBuilder.fromXDR(signedFundXDR, networkPassphrase));
 
-        // 5. Load newly created multisig account
-        const multisigAccount = await server.loadAccount(multisigPublicKey);
+      const multisigAccount = await server.loadAccount(multisigPublicKey);
 
-        // 6. Build multisig configuration transaction
-        let multisigConfigTx = new TransactionBuilder(multisigAccount, {
-          fee: BASE_FEE,
-          networkPassphrase,
-        });
+      let multisigConfigTx = new TransactionBuilder(multisigAccount, {
+        fee: BASE_FEE,
+        networkPassphrase,
+      });
 
-        validSigners.forEach((signer) => {
-          multisigConfigTx = multisigConfigTx.addOperation(
-            Operation.setOptions({
-              signer: { ed25519PublicKey: signer, weight: 1 },
-            })
-          );
-        });
-
+      validSigners.forEach((signer) => {
         multisigConfigTx = multisigConfigTx.addOperation(
-          Operation.setOptions({
-            masterWeight: 0,
-            lowThreshold: threshold,
-            medThreshold: threshold,
-            highThreshold: threshold,
-          })
+          Operation.setOptions({ signer: { ed25519PublicKey: signer, weight: 1 } }),
         );
+      });
 
-        const txToSubmit = multisigConfigTx.setTimeout(180).build();
+      multisigConfigTx = multisigConfigTx.addOperation(
+        Operation.setOptions({
+          masterWeight: 0,
+          lowThreshold: threshold,
+          medThreshold: threshold,
+          highThreshold: threshold,
+        }),
+      );
 
-        // 6. Sign transaction with the multisig account (required to create multisig)
-        txToSubmit.sign(multisigKeypair);
+      const txToSubmit = multisigConfigTx.setTimeout(180).build();
+      txToSubmit.sign(multisigKeypair);
 
-        console.log("Multisig Config TX XDR:", txToSubmit.toXDR());
+      await server.submitTransaction(txToSubmit);
+      await createMultisig(multisigPublicKey, name, validSigners, threshold);
 
-        // 7. Submit transaction
-      try {
-        const result = await server.submitTransaction(txToSubmit);
-        console.log("Transaction successful:", result);
-        try {
-          await createMultisig(
-            multisigPublicKey,
-            name,
-            validSigners,
-            threshold
-          );
-        } catch (error) {
-          
-        }
-      } catch (error: any) {
-        console.error("Transaction failed:", error.response?.data || error);
-      }
-
-        // 8. Notify user
-        toast({
-          title: "Multisig Account Created",
-          description: `${name}: ${multisigPublicKey} with threshold ${threshold}`,
-        });
-        navigate(`/multisig/${multisigPublicKey}`);
-        console.log("Multisig Public Key:", multisigPublicKey);
+      toast({
+        title: "Multisig Account Created",
+        description: `${name}: ${multisigPublicKey}`,
+      });
+      navigate(`/multisig/${multisigPublicKey}`);
     } catch (error) {
-      console.error(error);
       toast({
         title: "Error",
         description: error instanceof Error ? error.message : "Failed to create multisig",
         variant: "destructive",
       });
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
 
   return (
-    <div className="max-w-3xl mx-auto  space-y-6">
+    <div className="max-w-3xl mx-auto space-y-6">
       <div>
-        <h1 className="text-4xl font-bold text-foreground mb-2">Create Multisig Account</h1>
+        <h1 className="text-3xl font-bold text-foreground mb-1">Create Multisig Account</h1>
         <p className="text-muted-foreground">Set up a new multisignature account on Stellar</p>
       </div>
 
-      <Card className="shadow-md">
+      <Card>
         <CardHeader>
           <CardTitle>Multisig Configuration</CardTitle>
           <CardDescription>
@@ -195,45 +166,51 @@ export default function CreateMultisig() {
         <CardContent>
           <form onSubmit={handleSubmit} className="space-y-6">
             <div className="space-y-2">
-              <Label htmlFor="name" className="text-base font-semibold">
-                Account Name
-              </Label>
+              <Label htmlFor="name">Account Name</Label>
               <Input
                 id="name"
                 placeholder="e.g., Treasury Account, Team Wallet"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
+                disabled={isSubmitting}
               />
               <p className="text-sm text-muted-foreground">
                 A friendly name to identify this multisig account
               </p>
             </div>
 
-            <div className="space-y-4">
+            <div className="space-y-3">
               <div className="flex items-center justify-between">
-                <Label className="text-base font-semibold">Signers</Label>
-                <Button type="button" onClick={addSigner} size="sm" variant="outline" className="gap-2">
+                <Label>Signers</Label>
+                <Button
+                  type="button"
+                  onClick={addSigner}
+                  size="sm"
+                  variant="outline"
+                  className="gap-2"
+                  disabled={isSubmitting}
+                >
                   <PlusCircle className="w-4 h-4" />
                   Add Signer
                 </Button>
               </div>
 
               {signers.map((signer, index) => (
-                <div key={index} className="flex gap-3">
-                  <div className="flex-1">
-                    <Input
-                      placeholder="Stellar public key (G...)"
-                      value={signer}
-                      onChange={(e) => updateSigner(index, e.target.value)}
-                      className="font-mono"
-                    />
-                  </div>
+                <div key={index} className="flex gap-2">
+                  <Input
+                    placeholder="Stellar public key (G...)"
+                    value={signer}
+                    onChange={(e) => updateSigner(index, e.target.value)}
+                    className="font-mono flex-1"
+                    disabled={isSubmitting}
+                  />
                   {signers.length > 1 && (
                     <Button
                       type="button"
                       onClick={() => removeSigner(index)}
                       size="icon"
                       variant="outline"
+                      disabled={isSubmitting}
                     >
                       <X className="w-4 h-4" />
                     </Button>
@@ -243,9 +220,7 @@ export default function CreateMultisig() {
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="threshold" className="text-base font-semibold">
-                Signature Threshold
-              </Label>
+              <Label htmlFor="threshold">Signature Threshold</Label>
               <div className="flex items-center gap-4">
                 <Input
                   id="threshold"
@@ -255,21 +230,24 @@ export default function CreateMultisig() {
                   value={threshold}
                   onChange={(e) => setThreshold(Number(e.target.value))}
                   className="w-32"
+                  disabled={isSubmitting}
                 />
                 <p className="text-sm text-muted-foreground">
                   out of {signers.length} signer{signers.length !== 1 ? "s" : ""} required
                 </p>
               </div>
-              <p className="text-sm text-muted-foreground">
-                The minimum number of signatures required to execute a transaction
-              </p>
             </div>
 
-            <div className="pt-4">
-              <Button type="submit" size="lg" className="w-full">
-                Create Multisig Account
-              </Button>
-            </div>
+            <Button type="submit" size="lg" className="w-full" disabled={isSubmitting}>
+              {isSubmitting ? (
+                <>
+                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  Creating...
+                </>
+              ) : (
+                "Create Multisig Account"
+              )}
+            </Button>
           </form>
         </CardContent>
       </Card>

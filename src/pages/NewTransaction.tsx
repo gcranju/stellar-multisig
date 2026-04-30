@@ -167,15 +167,13 @@ export default function NewContractTransaction() {
         }
       });
 
-      const result = await createProposal({
+      await createProposal({
         contractId: destination,
         functionName: selectedFunction,
         args: processedParams,
         schema: jsonSchema,
         source: address
       });
-
-      console.log("Transaction XDR:", result.xdr);
 
       toast({
         title: "Proposal XDR Generated",

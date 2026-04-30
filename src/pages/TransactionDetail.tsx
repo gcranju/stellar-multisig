@@ -1,6 +1,7 @@
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Skeleton } from "@/components/ui/skeleton";
 import { useParams, useNavigate } from "react-router-dom";
 import { useEvm } from "@/context/EvmContext";
 import { useStellar } from "@/context/StellarContext";
@@ -9,7 +10,6 @@ import { useEffect, useState } from "react";
 import { ArrowLeft, CheckCircle2, Clock, Loader2, Shield } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { TransactionBuilder, Transaction } from "@stellar/stellar-sdk";
-import { set } from "date-fns";
 
 interface DecodedTransaction {
   source: string;
@@ -18,55 +18,55 @@ interface DecodedTransaction {
   sequenceNumber: string;
 }
 
+interface MultisigData {
+  threshold: number;
+  signers: string[];
+}
+
 export default function TransactionDetail() {
   const { address, proposalId } = useParams();
   const navigate = useNavigate();
-  const { getProposal, deleteProposal } = useEvm(); 
-  const { server, networkPassphrase, signAndExecuteProposal, signProposal, fetchSignersAndThresholds } = useStellar();
+  const { getProposal, deleteProposal } = useEvm();
+  const { networkPassphrase, signAndExecuteProposal, signProposal, fetchSignersAndThresholds } = useStellar();
   const { walletAddress } = useWallet();
   const { toast } = useToast();
-  const [multisigData, setMultisigData] = useState<any>(null);
+  const [multisigData, setMultisigData] = useState<MultisigData | null>(null);
   const [proposal, setProposal] = useState<any>(null);
   const [decodedTx, setDecodedTx] = useState<DecodedTransaction | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isApproving, setIsApproving] = useState(false);
   const [isExecuting, setIsExecuting] = useState(false);
-  const [approvalCount, setApprovalCount] = useState(0);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [approvalCount, setApprovalCount] = useState(0);
 
   useEffect(() => {
-    const fetchData = async () => {
-      if (!address || !proposalId) return;
-      
-      setIsLoading(true);
-      try { 
-        // Fetch multisig metadata
-        const metadata = await fetchSignersAndThresholds(address);
-        if (metadata) {
-          setMultisigData(metadata);
-        }
+    if (!address || !proposalId) return;
+    let cancelled = false;
+    setIsLoading(true);
 
-        // Fetch proposal
-        const proposalData = await getProposal(address, parseInt(proposalId));
+    (async () => {
+      try {
+        const [metadata, proposalData] = await Promise.all([
+          fetchSignersAndThresholds(address),
+          getProposal(address, parseInt(proposalId)),
+        ]);
+        if (cancelled) return;
+
+        if (metadata) setMultisigData(metadata);
+
         if (proposalData) {
-          setProposal(proposalData); 
-          setApprovalCount(proposalData.signers.signedSigners.length);
-          
-          // Decode XDR
+          setProposal(proposalData);
+          setApprovalCount(proposalData.signers?.signedSigners.length ?? 0);
+
           try {
             const tx = TransactionBuilder.fromXDR(proposalData.xdr, networkPassphrase) as Transaction;
-            
             setDecodedTx({
               source: tx.source,
-              operations: tx.operations.map((op: any) => ({
-                type: op.type,
-                ...op,
-              })),
+              operations: tx.operations.map((op: any) => ({ type: op.type, ...op })),
               fee: tx.fee,
               sequenceNumber: tx.sequence,
             });
-          } catch (error) {
-            console.error("Error decoding XDR:", error);
+          } catch {
             toast({
               title: "Error",
               description: "Failed to decode transaction XDR",
@@ -75,41 +75,40 @@ export default function TransactionDetail() {
           }
         }
       } catch (error) {
-        console.error("Error fetching data:", error);
+        if (cancelled) return;
         toast({
           title: "Error",
           description: "Failed to load transaction details",
           variant: "destructive",
-        }); 
+        });
       } finally {
-        setIsLoading(false);
+        if (!cancelled) setIsLoading(false);
       }
-    };
+    })();
 
-    fetchData();
-  }, [address, proposalId, getProposal, fetchSignersAndThresholds]);
+    return () => {
+      cancelled = true;
+    };
+  }, [address, proposalId, getProposal, fetchSignersAndThresholds, networkPassphrase, toast]);
 
   const handleApprove = async () => {
+    if (!proposal || !address || !proposalId) return;
     setIsApproving(true);
     try {
-      if (!proposal || !address) return;
-
       await signProposal({
         multisigAddress: address,
-        proposalId: parseInt(proposalId || "0"),
+        proposalId: parseInt(proposalId),
         signer: walletAddress,
         xdr: proposal.xdr,
       });
 
       const proposalData = await getProposal(address, parseInt(proposalId));
-      setApprovalCount(proposalData.signers.signedSigners.length);
+      if (proposalData) {
+        setApprovalCount(proposalData.signers?.signedSigners.length ?? 0);
+      }
 
-      toast({
-        title: "Success",
-        description: "Transaction approved",
-      });
+      toast({ title: "Success", description: "Transaction approved" });
     } catch (error) {
-      console.error("Error approving:", error);
       toast({
         title: "Error",
         description: "Failed to approve transaction",
@@ -121,21 +120,13 @@ export default function TransactionDetail() {
   };
 
   const handleDelete = async () => {
-    if (!proposal || !multisigData) return;
-    
+    if (!proposal || !address || !proposalId) return;
     setIsDeleting(true);
     try {
-      await deleteProposal(
-        address!,
-        parseInt(proposalId)
-      );
-      toast({
-        title: "Success",
-        description: "Proposal soft deleted successfully",
-      });
+      await deleteProposal(address, parseInt(proposalId));
+      toast({ title: "Success", description: "Proposal deleted" });
       navigate(`/multisig/${address}/transactions`);
     } catch (error) {
-      console.error("Error deleting:", error);
       toast({
         title: "Error",
         description: "Failed to delete proposal",
@@ -144,28 +135,23 @@ export default function TransactionDetail() {
     } finally {
       setIsDeleting(false);
     }
-  }
+  };
 
   const handleExecute = async () => {
-    if (!proposal || !multisigData) return;
-    
+    if (!proposal || !multisigData || !address || !proposalId) return;
     setIsExecuting(true);
     try {
-      let shouldSign = proposal.signers.signedSigners.length < multisigData.threshold;
+      const shouldSign = proposal.signers.signedSigners.length < multisigData.threshold;
       await signAndExecuteProposal({
-        multisigAddress: address!,
+        multisigAddress: address,
         proposalId: parseInt(proposalId),
         signer: walletAddress!,
         xdr: proposal.xdr,
         sign: shouldSign,
       });
-      toast({
-        title: "Success",
-        description: "Transaction executed successfully",
-      });
+      toast({ title: "Success", description: "Transaction executed successfully" });
       navigate(`/multisig/${address}/transactions`);
     } catch (error) {
-      console.error("Error executing:", error);
       toast({
         title: "Error",
         description: "Failed to execute transaction",
@@ -176,33 +162,37 @@ export default function TransactionDetail() {
     }
   };
 
-  const formatDate = (timestamp: number) => {
-    const date = new Date(timestamp * 1000);
-    return date.toLocaleString();
-  };
+  const formatDate = (timestamp: number) => new Date(timestamp * 1000).toLocaleString();
 
-  const thresholdReached = approvalCount >= (multisigData?.threshold || 0) - 1;
+  const threshold = multisigData?.threshold ?? 0;
+  const thresholdReached = approvalCount >= threshold;
+  const remaining = Math.max(threshold - approvalCount, 0);
 
   if (isLoading) {
-    return ( 
-      <div className="flex items-center justify-center min-h-[400px]">
-        <Loader2 className="w-8 h-8 animate-spin text-muted-foreground" />
+    return (
+      <div className="space-y-6 max-w-6xl mx-auto">
+        <Skeleton className="h-9 w-40" />
+        <Skeleton className="h-10 w-64" />
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <Skeleton className="lg:col-span-2 h-96" />
+          <Skeleton className="h-64" />
+        </div>
       </div>
     );
   }
 
   if (!proposal) {
     return (
-      <div className="space-y-6">
-        <Button 
-          variant="ghost" 
+      <div className="space-y-6 max-w-3xl mx-auto">
+        <Button
+          variant="ghost"
           onClick={() => navigate(`/multisig/${address}/transactions`)}
           className="gap-2"
         >
           <ArrowLeft className="w-4 h-4" />
           Back to Transactions
         </Button>
-        <Card className="shadow-md">
+        <Card>
           <CardContent className="text-center py-12">
             <p className="text-lg text-muted-foreground">Transaction not found</p>
           </CardContent>
@@ -212,105 +202,93 @@ export default function TransactionDetail() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 max-w-6xl mx-auto">
       <div className="flex items-center justify-between">
-        <Button  
-          variant="ghost" 
+        <Button
+          variant="ghost"
           onClick={() => navigate(`/multisig/${address}/transactions`)}
           className="gap-2"
-        > 
+        >
           <ArrowLeft className="w-4 h-4" />
           Back to Transactions
         </Button>
-        <div className="flex items-center gap-2">
-          {proposal.executed ? (
-            <Badge variant="default" className="gap-1">
-              <CheckCircle2 className="w-3 h-3" />
-              Executed
-            </Badge>
-          ) : (
-            <Badge variant="secondary" className="gap-1">
-              <Clock className="w-3 h-3" />
-              Pending
-            </Badge>
-          )}
-        </div>
+        {proposal.executed ? (
+          <Badge variant="default" className="gap-1">
+            <CheckCircle2 className="w-3 h-3" />
+            Executed
+          </Badge>
+        ) : (
+          <Badge variant="secondary" className="gap-1">
+            <Clock className="w-3 h-3" />
+            Pending
+          </Badge>
+        )}
       </div>
 
       <div>
-        <h1 className="text-4xl font-bold text-foreground mb-2">
+        <h1 className="text-3xl font-bold text-foreground mb-1">
           Transaction #{proposalId}
         </h1>
         <p className="text-muted-foreground">
-          Created {formatDate(Number(proposal.createdAt.toString()))}
+          Created {formatDate(Number(proposal.createdAt))}
         </p>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <Card className="lg:col-span-2 shadow-md">
+        <Card className="lg:col-span-2">
           <CardHeader>
             <CardTitle>Transaction Details</CardTitle>
             <CardDescription>Decoded transaction information</CardDescription>
           </CardHeader>
           <CardContent className="space-y-6">
             {proposal.description && (
-              <div>
-                <h3 className="text-sm font-semibold text-muted-foreground mb-2">Description</h3>
-                <div className="p-3 bg-muted/50 rounded-lg">
-                  <p className="text-sm text-foreground">{proposal.description}</p>
-                </div>
-              </div>
+              <Section label="Description">
+                <p className="text-sm text-foreground">{proposal.description}</p>
+              </Section>
             )}
 
             {decodedTx && (
               <>
-                <div>
-                  <h3 className="text-sm font-semibold text-muted-foreground mb-2">Source Account</h3>
+                <Section label="Source Account">
                   <code className="block p-3 bg-muted rounded text-sm font-mono break-all">
                     {decodedTx.source}
                   </code>
-                </div>
+                </Section>
 
-                <div>
-                  <h3 className="text-sm font-semibold text-muted-foreground mb-2">Operations</h3>
+                <Section label="Operations">
                   <div className="space-y-2">
                     {decodedTx.operations.map((op, idx) => (
                       <div key={idx} className="p-3 bg-muted rounded-lg">
-                        <p className="text-sm font-semibold text-foreground mb-1">
-                          {op.type}
-                        </p>
+                        <p className="text-sm font-semibold text-foreground mb-1">{op.type}</p>
                         <pre className="text-xs text-muted-foreground overflow-auto">
                           {JSON.stringify(op, null, 2)}
                         </pre>
                       </div>
                     ))}
                   </div>
-                </div>
+                </Section>
 
                 <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <h3 className="text-sm font-semibold text-muted-foreground mb-2">Fee</h3>
+                  <Section label="Fee">
                     <p className="text-sm font-mono text-foreground">{decodedTx.fee} stroops</p>
-                  </div>
-                  <div>
-                    <h3 className="text-sm font-semibold text-muted-foreground mb-2">Sequence</h3>
+                  </Section>
+                  <Section label="Sequence">
                     <p className="text-sm font-mono text-foreground">{decodedTx.sequenceNumber}</p>
-                  </div>
+                  </Section>
                 </div>
               </>
             )}
 
-            <div>
-              <h3 className="text-sm font-semibold text-muted-foreground mb-2">Raw XDR</h3>
+            <Section label="Raw XDR">
               <code className="block p-3 bg-muted rounded text-xs font-mono break-all max-h-32 overflow-auto">
                 {proposal.xdr}
               </code>
-            </div>
+            </Section>
           </CardContent>
         </Card>
 
         <div className="space-y-6">
-          <Card className="shadow-md">
+          <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 <Shield className="w-5 h-5 text-primary" />
@@ -320,16 +298,16 @@ export default function TransactionDetail() {
             <CardContent className="space-y-4">
               <div className="p-4 bg-muted/50 rounded-lg">
                 <div className="flex items-center justify-between mb-2">
-                  <span className="text-sm text-muted-foreground">Threshold</span>
+                  <span className="text-sm text-muted-foreground">Approvals</span>
                   <span className="text-2xl font-bold text-foreground">
-                    {approvalCount} / {multisigData?.threshold}
+                    {approvalCount} / {threshold}
                   </span>
                 </div>
-                <div className="w-full bg-muted rounded-full h-2">
-                  <div 
+                <div className="w-full bg-muted rounded-full h-2 overflow-hidden">
+                  <div
                     className="bg-primary h-2 rounded-full transition-all"
-                    style={{ 
-                      width: `${Math.min((approvalCount / (multisigData?.threshold || 1)) * 100, 100)}%` 
+                    style={{
+                      width: `${threshold ? Math.min((approvalCount / threshold) * 100, 100) : 0}%`,
                     }}
                   />
                 </div>
@@ -337,9 +315,9 @@ export default function TransactionDetail() {
 
               {!proposal.executed && (
                 <div className="space-y-2">
-                  <Button 
+                  <Button
                     onClick={handleApprove}
-                    disabled={isApproving || proposal.executed}
+                    disabled={isApproving}
                     className="w-full"
                     variant="outline"
                   >
@@ -353,11 +331,10 @@ export default function TransactionDetail() {
                     )}
                   </Button>
 
-                  <Button 
+                  <Button
                     onClick={handleExecute}
-                    disabled={!thresholdReached || isExecuting || proposal.executed}
+                    disabled={!thresholdReached || isExecuting}
                     className="w-full"
-                    
                   >
                     {isExecuting ? (
                       <>
@@ -368,10 +345,10 @@ export default function TransactionDetail() {
                       "Execute Transaction"
                     )}
                   </Button>
-                  
+
                   {!thresholdReached && (
                     <p className="text-xs text-center text-muted-foreground">
-                      Need {multisigData?.threshold - approvalCount} more approval(s)
+                      {remaining} more approval{remaining === 1 ? "" : "s"} required
                     </p>
                   )}
                 </div>
@@ -388,14 +365,14 @@ export default function TransactionDetail() {
             </CardContent>
           </Card>
 
-          <Card className="shadow-md">
+          <Card>
             <CardHeader>
               <CardTitle>Signers</CardTitle>
-              <CardDescription>{multisigData?.signers.length || 0} authorized</CardDescription>
+              <CardDescription>{multisigData?.signers.length ?? 0} authorized</CardDescription>
             </CardHeader>
             <CardContent>
               <div className="space-y-2">
-                {multisigData?.signers.map((signer: string, idx: number) => (
+                {multisigData?.signers.map((signer, idx) => (
                   <div key={idx} className="p-2 bg-muted rounded text-xs font-mono break-all">
                     {signer}
                   </div>
@@ -404,25 +381,34 @@ export default function TransactionDetail() {
             </CardContent>
           </Card>
 
-          <Card className="shadow-md">
-               <Button 
-                    onClick={handleDelete}
-                    disabled={isDeleting || proposal.executed}
-                    className="w-full opacity-50"
-                    variant="destructive"
-                  >
-                    {isDeleting ? (
-                      <>
-                        <Loader2 className="w-4 h-4 mr-2 animate-spin " />
-                        Executing...
-                      </>
-                    ) : (
-                      "Soft Delete Proposal"
-                    )}
-                  </Button>
-          </Card>
+          {!proposal.executed && (
+            <Button
+              onClick={handleDelete}
+              disabled={isDeleting}
+              className="w-full"
+              variant="destructive"
+            >
+              {isDeleting ? (
+                <>
+                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  Deleting...
+                </>
+              ) : (
+                "Delete Proposal"
+              )}
+            </Button>
+          )}
         </div>
       </div>
+    </div>
+  );
+}
+
+function Section({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <h3 className="text-sm font-semibold text-muted-foreground mb-2">{label}</h3>
+      {children}
     </div>
   );
 }
