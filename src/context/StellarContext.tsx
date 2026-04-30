@@ -288,42 +288,54 @@ export const StellarProvider: React.FC<{ children: React.ReactNode }> = ({
         return { success: true, result: simulated };
     }
 
+    const bigIntReplacer = (_key: string, value: unknown) =>
+        typeof value === "bigint" ? value.toString() : value;
+
     /**
      * Helper: submitAndCheckTransaction
      * - If checkOnly === true -> simulate the signed tx to validate it (no submit)
      * - If checkOnly === false -> submit to network and ensure success
      * - Throws on failure
      */
-    const submitAndCheckTransaction = async (signedTxXdr: string, timeout = 15000, checkInterval = 1500) => {
+    const submitAndCheckTransaction = async (signedTxXdr: string, timeout = 30000, checkInterval = 1500) => {
         const txObj = TransactionBuilder.fromXDR(signedTxXdr, networkPassphrase);
 
         const result = await server.sendTransaction(txObj);
 
         if (!result) {
-            throw new Error(`Stellar submission failed: ${JSON.stringify(result)}`);
+            throw new Error("Stellar submission failed: empty response");
         }
 
-        // If status is PENDING, we poll for a final status
-        if (result.status === "PENDING") {
-            const startTime = Date.now();
+        if (result.status !== "PENDING") {
+            const raw = (result as any).errorResult ?? (result as any).errorResultXdr ?? result;
+            const detail = typeof raw === "string" ? raw : JSON.stringify(raw, bigIntReplacer);
+            console.error("Stellar submission rejected:", result);
+            throw new Error(`Stellar submission ${result.status}: ${detail}`);
+        }
 
-            while (Date.now() - startTime < timeout) {
-                await new Promise((res) => setTimeout(res, checkInterval));
+        const startTime = Date.now();
+        let lastErr: unknown = null;
 
-                try {
-                    const statusResponse = await server.getTransaction(result.hash);
-                    if (statusResponse.status === "SUCCESS") {
-                        return { success: true, result: statusResponse };
-                    } else if (statusResponse.status === "FAILED") {
-                        throw new Error(`Stellar transaction failed: ${JSON.stringify(statusResponse)}`);
-                    }
-                } catch (err) {
-                    console.warn("Error querying tx status, retrying", err);
+        while (Date.now() - startTime < timeout) {
+            await new Promise((res) => setTimeout(res, checkInterval));
+
+            try {
+                const statusResponse = await server.getTransaction(result.hash);
+                if (statusResponse.status === "SUCCESS") {
+                    const txHash = (statusResponse as any).txHash ?? result.hash;
+                    return { success: true, result: { ...statusResponse, txHash } };
+                } else if (statusResponse.status === "FAILED") {
+                    throw new Error(`Stellar transaction failed: ${JSON.stringify(statusResponse)}`);
                 }
+            } catch (err) {
+                lastErr = err;
+                console.warn("Error querying tx status, retrying", err);
             }
-
-            throw new Error(`Transaction did not complete within ${timeout}ms`);
         }
+
+        throw new Error(
+            `Transaction did not complete within ${timeout}ms${lastErr ? `: ${lastErr}` : ""}`,
+        );
     };
 
 
