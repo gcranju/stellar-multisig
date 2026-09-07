@@ -3,6 +3,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
 import { useStellar } from "@/context/StellarContext";
@@ -102,7 +103,20 @@ export default function NewContractTransaction() {
   const handleFunctionChange = (funcName) => {
     setSelectedFunction(funcName);
     const func = functions.find((f) => f.name === funcName);
-    setParams(func ? func.params.reduce((acc, p) => ({ ...acc, [p.name]: "" }), {}) : {});
+    setParams(
+      func
+        ? func.params.reduce(
+            (acc, p) => ({ ...acc, [p.name]: isBoolParam(p.schema) ? false : "" }),
+            {}
+          )
+        : {}
+    );
+  };
+
+  const isBoolParam = (paramSchema) => {
+    const ref = paramSchema["$ref"];
+    if (ref && /\/Bool$/i.test(ref)) return true;
+    return paramSchema.type === "boolean";
   };
 
   const getInputPlaceholder = (paramSchema) => {
@@ -142,7 +156,7 @@ export default function NewContractTransaction() {
 
     const func = functions.find(f => f.name === selectedFunction);
     const missingParams = func.params
-      .filter(p => p.required && !params[p.name])
+      .filter(p => p.required && !isBoolParam(p.schema) && !params[p.name])
       .map(p => p.name);
 
     if (missingParams.length > 0) {
@@ -249,16 +263,31 @@ export default function NewContractTransaction() {
                           {param.name}
                           {param.required && <span className="text-red-500 ml-1">*</span>}
                         </Label>
-                        <Input
-                          type={getInputType(param.schema)}
-                          placeholder={getInputPlaceholder(param.schema)}
-                          value={params[param.name] || ""}
-                          onChange={(e) =>
-                            setParams({ ...params, [param.name]: e.target.value })
-                          }
-                          className="font-mono text-sm"
-                          disabled={isSubmitting}
-                        />
+                        {isBoolParam(param.schema) ? (
+                          <div className="flex items-center gap-2">
+                            <Switch
+                              checked={params[param.name] === true}
+                              onCheckedChange={(checked) =>
+                                setParams({ ...params, [param.name]: checked })
+                              }
+                              disabled={isSubmitting}
+                            />
+                            <span className="font-mono text-sm text-muted-foreground">
+                              {params[param.name] === true ? "true" : "false"}
+                            </span>
+                          </div>
+                        ) : (
+                          <Input
+                            type={getInputType(param.schema)}
+                            placeholder={getInputPlaceholder(param.schema)}
+                            value={params[param.name] || ""}
+                            onChange={(e) =>
+                              setParams({ ...params, [param.name]: e.target.value })
+                            }
+                            className="font-mono text-sm"
+                            disabled={isSubmitting}
+                          />
+                        )}
                       </div>
                     ))}
               </>

@@ -130,7 +130,24 @@ export const StellarProvider: React.FC<{ children: React.ReactNode }> = ({
     /**
      * convertToScVal
      */
+    function toBool(value: any) {
+        if (typeof value === "boolean") return value;
+        if (typeof value === "string") {
+            const normalized = value.trim().toLowerCase();
+            if (normalized === "true" || normalized === "1") return true;
+            if (normalized === "" || normalized === "false" || normalized === "0") return false;
+        }
+        if (typeof value === "number") return value !== 0;
+        throw new Error(`Invalid boolean value: ${value}`);
+    }
+
     function convertToScVal(value: any, typeDef: any) {
+        // Soroban JSON schemas express bools as { type: "boolean" } (no $ref),
+        // so check that before the $ref switch below.
+        if (typeDef?.type === "boolean") {
+            return nativeToScVal(toBool(value), { type: "bool" });
+        }
+
         if (typeDef?.$ref) {
             const refType = typeDef.$ref.split("/").pop();
 
@@ -176,7 +193,7 @@ export const StellarProvider: React.FC<{ children: React.ReactNode }> = ({
                 case "Bool":
                 case "bool":
                 case "boolean":
-                    return nativeToScVal(value, { type: "bool" });
+                    return nativeToScVal(toBool(value), { type: "bool" });
 
                 default:
                     return nativeToScVal(value);
