@@ -10,6 +10,7 @@ import { Clock, CheckCircle2, ArrowRight, Plus } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { ErrorPanel } from "@/components/ErrorPanel";
 import { describeError, type FriendlyError } from "@/lib/errors";
+import { useStellar } from "@/context/StellarContext";
 
 interface Proposal {
   proposalId: bigint;
@@ -35,6 +36,10 @@ export default function Transactions() {
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<FriendlyError | null>(null);
+  // Proposal ids whose transaction hash was found on-chain despite the EVM
+  // record still showing them as queued (executed outside this app).
+  const [onChainIds, setOnChainIds] = useState<Set<string>>(new Set());
+  const { transactionHashFromXdr, lookupTransaction } = useStellar();
 
   useEffect(() => {
     if (!address) return;
@@ -66,6 +71,37 @@ export default function Transactions() {
 
   const queuedProposals = proposals.filter((p) => !p.executed);
   const executedProposals = proposals.filter((p) => p.executed);
+
+  // Read-only sweep: flag queued proposals that are already on-chain. Marking
+  // them executed writes to the EVM record, so that stays an explicit action on
+  // the detail page rather than something a list render fires off.
+  useEffect(() => {
+    const queued = proposals.filter((p) => !p.executed && !p.isDeleted);
+    if (queued.length === 0) return;
+
+    let cancelled = false;
+
+    (async () => {
+      const found = new Set<string>();
+
+      for (const proposal of queued) {
+        if (cancelled) return;
+        try {
+          const hash = transactionHashFromXdr(proposal.xdr);
+          const result = await lookupTransaction(hash);
+          if (result?.status === "SUCCESS") found.add(proposal.proposalId.toString());
+        } catch (err) {
+          console.warn(`Could not check proposal ${proposal.proposalId} against chain state`, err);
+        }
+      }
+
+      if (!cancelled) setOnChainIds(found);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [proposals]);
 
   return (
     <div className="space-y-6 max-w-5xl mx-auto">
@@ -110,6 +146,7 @@ export default function Transactions() {
                 key={proposal.proposalId.toString()}
                 proposal={proposal}
                 threshold={multisigData?.threshold}
+                foundOnChain={onChainIds.has(proposal.proposalId.toString())}
                 onView={() =>
                   navigate(`/multisig/${address}/transactions/${proposal.proposalId}`)
                 }
@@ -154,10 +191,12 @@ function ProposalCard({
   proposal,
   threshold,
   onView,
+  foundOnChain,
 }: {
   proposal: Proposal;
   threshold?: number;
   onView: () => void;
+  foundOnChain?: boolean;
 }) {
   return (
     <Card className="hover:border-primary/40 transition-colors cursor-pointer" onClick={onView}>
@@ -168,8 +207,20 @@ function ProposalCard({
               <h3 className="font-semibold">
                 Proposal #{proposal.proposalId.toLocaleString()}
               </h3>
-              <Badge variant="secondary">Awaiting Execution</Badge>
+              {foundOnChain ? (
+                <Badge className="gap-1 border-success/30 bg-success/10 text-success" variant="outline">
+                  <CheckCircle2 className="w-3 h-3" />
+                  Found on-chain
+                </Badge>
+              ) : (
+                <Badge variant="secondary">Awaiting Execution</Badge>
+              )}
             </div>
+            {foundOnChain && (
+              <p className="text-xs text-muted-foreground">
+                Executed outside this app - open it to sync the record.
+              </p>
+            )}
             {proposal.description && (
               <p className="text-sm text-muted-foreground line-clamp-2">{proposal.description}</p>
             )}

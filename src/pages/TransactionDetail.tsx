@@ -12,7 +12,7 @@ import { useToast } from "@/hooks/use-toast";
 import { TransactionBuilder, Transaction } from "@stellar/stellar-sdk";
 import { ErrorPanel } from "@/components/ErrorPanel";
 import { describeError, TransactionPendingError, type FriendlyError } from "@/lib/errors";
-import { chainContext } from "@/lib/network";
+import { chainContext, explorerBase } from "@/lib/network";
 
 interface DecodedTransaction {
   source: string;
@@ -36,6 +36,7 @@ export default function TransactionDetail() {
     signProposal,
     fetchSignersAndThresholds,
     confirmPendingExecution,
+    reconcileProposalExecution,
   } = useStellar();
   const { walletAddress } = useWallet();
   const { toast } = useToast();
@@ -51,6 +52,7 @@ export default function TransactionDetail() {
   // Hash of a submitted transaction the RPC had not confirmed before we stopped polling.
   const [pendingHash, setPendingHash] = useState<string | null>(null);
   const [isChecking, setIsChecking] = useState(false);
+  const [isReconciling, setIsReconciling] = useState(false);
 
   /** Network + explorer rows attached to every error this page reports. */
   const errorContext = () => ({
@@ -108,6 +110,63 @@ export default function TransactionDetail() {
       cancelled = true;
     };
   }, [address, proposalId, getProposal, fetchSignersAndThresholds, networkPassphrase, toast]);
+
+  /**
+   * A proposal can be executed outside this app by submitting its raw XDR. The
+   * transaction hash is derived from the envelope's signature base, so it is
+   * identical either way - if that hash is already on-chain, the proposal is
+   * done and the EVM record just has not caught up.
+   */
+  useEffect(() => {
+    if (!address || !proposalId || !proposal || proposal.executed || proposal.isDeleted) return;
+
+    let cancelled = false;
+    setIsReconciling(true);
+
+    (async () => {
+      try {
+        const outcome = await reconcileProposalExecution({
+          multisigAddress: address,
+          proposalId: parseInt(proposalId),
+          xdr: proposal.xdr,
+        });
+        if (cancelled || !outcome) return;
+
+        if (outcome.status === "SUCCESS") {
+          const refreshed = await getProposal(address, parseInt(proposalId));
+          if (cancelled) return;
+
+          if (refreshed) setProposal(refreshed);
+          toast({
+            title: "Already executed",
+            description: "This transaction was found on-chain and has been marked as executed.",
+          });
+        } else {
+          // Included but failed: the proposal stays open so it can be retried.
+          setError({
+            title: "Previous attempt failed on-chain",
+            message: "This transaction was submitted before and failed, so the proposal is still open.",
+            hint: `Hash ${outcome.hash} - review it on the explorer before executing again.`,
+            severity: "warning",
+            link: {
+              href: `${explorerBase(networkPassphrase)}/tx/${outcome.hash}`,
+              label: "View failed attempt",
+            },
+          });
+        }
+      } catch (err) {
+        // Best effort: a reconciliation failure must not block the page.
+        console.warn("Could not reconcile proposal against chain state", err);
+      } finally {
+        if (!cancelled) setIsReconciling(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+    // Re-runs when the proposal identity or its executed flag changes.
+  }, [address, proposalId, proposal?.xdr, proposal?.executed]);
 
   const handleApprove = async () => {
     if (!proposal || !address || !proposalId) return;
@@ -410,13 +469,18 @@ export default function TransactionDetail() {
 
                   <Button
                     onClick={handleExecute}
-                    disabled={!thresholdReached || isExecuting || !!pendingHash}
+                    disabled={!thresholdReached || isExecuting || isReconciling || !!pendingHash}
                     className="w-full"
                   >
                     {isExecuting ? (
                       <>
                         <Loader2 className="w-4 h-4 mr-2 animate-spin" />
                         Executing...
+                      </>
+                    ) : isReconciling ? (
+                      <>
+                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                        Checking chain state...
                       </>
                     ) : (
                       "Execute Transaction"

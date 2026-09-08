@@ -81,6 +81,15 @@ type StellarContextProps = {
         proposalId: number;
         hash: string;
     }) => Promise<"SUCCESS" | "FAILED" | "PENDING">;
+    transactionHashFromXdr: (xdr: string) => string;
+    lookupTransaction: (hash: string) => Promise<
+        { status: "SUCCESS" | "FAILED"; hash: string; source: "rpc" | "horizon" } | null
+    >;
+    reconcileProposalExecution: (options: {
+        multisigAddress: string;
+        proposalId: number;
+        xdr: string;
+    }) => Promise<{ status: "SUCCESS" | "FAILED"; hash: string } | null>;
 };
 
 const StellarContext = createContext<StellarContextProps | undefined>(undefined);
@@ -527,6 +536,88 @@ export const StellarProvider: React.FC<{ children: React.ReactNode }> = ({
     };
 
     /**
+     * The transaction hash is computed over the signature base, which does not
+     * include signatures. A proposal submitted from anywhere - this app, the
+     * Stellar Lab, the CLI - therefore lands under the same hash as the stored
+     * envelope, so the stored XDR is enough to look up its on-chain fate.
+     */
+    const transactionHashFromXdr = (xdr: string) =>
+        TransactionBuilder.fromXDR(xdr, networkPassphrase).hash().toString("hex");
+
+    /**
+     * Look a transaction up by hash.
+     *
+     * Soroban RPC only retains recent ledgers, so anything older than its
+     * retention window falls back to Horizon, which keeps full history.
+     * Returns null when neither knows the hash (never submitted, or still
+     * unconfirmed).
+     */
+    const lookupTransaction = async (hash: string) => {
+        try {
+            const rpcResult = await server.getTransaction(hash);
+            if (rpcResult.status === "SUCCESS") {
+                return { status: "SUCCESS" as const, hash, source: "rpc" as const };
+            }
+            if (rpcResult.status === "FAILED") {
+                return { status: "FAILED" as const, hash, source: "rpc" as const };
+            }
+        } catch (err) {
+            console.warn(`RPC lookup for ${hash} failed, falling back to Horizon`, err);
+        }
+
+        try {
+            const record: any = await horizonServer.transactions().transaction(hash).call();
+            return {
+                status: record?.successful ? ("SUCCESS" as const) : ("FAILED" as const),
+                hash,
+                source: "horizon" as const,
+            };
+        } catch (err: any) {
+            // 404 is the expected "never landed" answer; anything else is a real fault.
+            const status = err?.response?.status ?? err?.status;
+            if (status && status !== 404) {
+                console.warn(`Horizon lookup for ${hash} failed`, err);
+            }
+        }
+
+        return null;
+    };
+
+    /**
+     * Detect a proposal that was already executed outside this app and bring the
+     * EVM record in line with the chain.
+     *
+     * Only SUCCESS is recorded: a FAILED attempt is reported back so the caller
+     * can say so, but the proposal stays open because it can be retried.
+     */
+    const reconcileProposalExecution = async ({
+        multisigAddress,
+        proposalId,
+        xdr,
+    }: {
+        multisigAddress: string;
+        proposalId: number;
+        xdr: string;
+    }) => {
+        let hash: string;
+        try {
+            hash = transactionHashFromXdr(xdr);
+        } catch (err) {
+            console.warn("Could not derive transaction hash from stored XDR", err);
+            return null;
+        }
+
+        const found = await lookupTransaction(hash);
+        if (!found) return null;
+
+        if (found.status === "SUCCESS") {
+            await markProposalExecuted(multisigAddress, proposalId, hash);
+        }
+
+        return { status: found.status, hash };
+    };
+
+    /**
      * signProposal
      * - Sign an XDR via Freighter (or throw)
      * - Only after signing succeeded save to EVM via signProposalEvm
@@ -614,12 +705,14 @@ export const StellarProvider: React.FC<{ children: React.ReactNode }> = ({
         proposalId: number;
         hash: string;
     }) => {
-        const status = await checkTransactionStatus(hash);
+        // lookupTransaction also covers Horizon, so a hash that aged out of the
+        // RPC's retention window still resolves.
+        const found = await lookupTransaction(hash);
 
-        if (!status) return "PENDING" as const;
+        if (!found) return "PENDING" as const;
 
-        if (status.status === "SUCCESS") {
-            await markProposalExecuted(multisigAddress, proposalId, status.txHash);
+        if (found.status === "SUCCESS") {
+            await markProposalExecuted(multisigAddress, proposalId, found.hash);
             return "SUCCESS" as const;
         }
 
@@ -842,6 +935,9 @@ export const StellarProvider: React.FC<{ children: React.ReactNode }> = ({
                 createProposal,
                 checkTransactionStatus,
                 confirmPendingExecution,
+                transactionHashFromXdr,
+                lookupTransaction,
+                reconcileProposalExecution,
                 createProposalToUpdateSigners,
                 createProposalToUpdateThreshold,
                 signProposal,
