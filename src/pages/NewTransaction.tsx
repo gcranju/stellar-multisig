@@ -12,6 +12,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { ErrorPanel } from "@/components/ErrorPanel";
 import { cn } from "@/lib/utils";
 import { describeError, type FriendlyError } from "@/lib/errors";
+import { chainContext } from "@/lib/network";
 
 export default function NewContractTransaction() {
   const [destination, setDestination] = useState("");
@@ -27,7 +28,14 @@ export default function NewContractTransaction() {
   const navigate = useNavigate();
   
 
-  const { fetchContractSpec, createProposal } = useStellar();
+  const { fetchContractSpec, createProposal, networkPassphrase } = useStellar();
+
+  /** Network + explorer rows attached to every error this page reports. */
+  const errorContext = () => ({
+    ...chainContext(networkPassphrase),
+    contractId: destination || undefined,
+    functionName: selectedFunction || undefined,
+  });
 
   const isValidContractId = (id) => {
     return id.startsWith("C") && id.length === 56;
@@ -79,7 +87,7 @@ export default function NewContractTransaction() {
       });
     } catch (err) {
       console.error("Error fetching contract spec:", err);
-      setError(describeError(err));
+      setError(describeError(err, errorContext()));
     } finally {
       setIsLoading(false);
     }
@@ -211,7 +219,7 @@ export default function NewContractTransaction() {
       navigate(`/multisig/${address}/transactions`);
     } catch (err) {
       console.error("Error creating proposal:", err);
-      setError(describeError(err));
+      setError(describeError(err, errorContext()));
     } finally {
       setIsSubmitting(false);
     }

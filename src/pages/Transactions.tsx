@@ -8,6 +8,8 @@ import { useEvm } from "@/context/EvmContext";
 import { useEffect, useState } from "react";
 import { Clock, CheckCircle2, ArrowRight, Plus } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+import { ErrorPanel } from "@/components/ErrorPanel";
+import { describeError, type FriendlyError } from "@/lib/errors";
 
 interface Proposal {
   proposalId: bigint;
@@ -32,6 +34,7 @@ export default function Transactions() {
   const [multisigData, setMultisigData] = useState<MultisigData | null>(null);
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<FriendlyError | null>(null);
 
   useEffect(() => {
     if (!address) return;
@@ -47,13 +50,10 @@ export default function Transactions() {
         if (cancelled) return;
         if (metadata) setMultisigData(metadata);
         setProposals(Array.from(proposalList).reverse());
-      } catch (error) {
+      } catch (err) {
         if (cancelled) return;
-        toast({
-          title: "Error",
-          description: "Failed to load multisig data",
-          variant: "destructive",
-        });
+        console.error("Error loading multisig data:", err);
+        setError(describeError(err, { account: address }));
       } finally {
         if (!cancelled) setIsLoading(false);
       }
@@ -82,6 +82,8 @@ export default function Transactions() {
           New Transaction
         </Button>
       </div>
+
+      <ErrorPanel error={error} onDismiss={() => setError(null)} />
 
       <Tabs defaultValue="queue" className="w-full">
         <TabsList className="grid w-full grid-cols-2 max-w-sm">

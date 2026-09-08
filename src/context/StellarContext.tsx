@@ -16,7 +16,8 @@ import { useWallet } from "@/context/WalletContext";
 import { signTransaction } from "@stellar/freighter-api";
 import { useEvm } from "./EvmContext";
 import { Buffer } from "buffer";
-import { ContractParamError } from "@/lib/errors";
+import { ContractParamError, TransactionPendingError } from "@/lib/errors";
+import { explorerBase } from "@/lib/network";
 import { Horizon } from "stellar-sdk";
 
 type FetchClientResult = {
@@ -72,6 +73,14 @@ type StellarContextProps = {
         signers: string[];
         threshold: number
     }>;
+    checkTransactionStatus: (hash: string) => Promise<
+        { status: "SUCCESS"; txHash: string } | { status: "FAILED"; reason: string } | null
+    >;
+    confirmPendingExecution: (options: {
+        multisigAddress: string;
+        proposalId: number;
+        hash: string;
+    }) => Promise<"SUCCESS" | "FAILED" | "PENDING">;
 };
 
 const StellarContext = createContext<StellarContextProps | undefined>(undefined);
@@ -373,53 +382,149 @@ export const StellarProvider: React.FC<{ children: React.ReactNode }> = ({
     const bigIntReplacer = (_key: string, value: unknown) =>
         typeof value === "bigint" ? value.toString() : value;
 
+    /** stellar.expert link for a submitted transaction, for the "still pending" case. */
+    const explorerTxUrl = (hash: string) => `${explorerBase(networkPassphrase)}/tx/${hash}`;
+
+    const sleep = (ms: number) => new Promise((res) => setTimeout(res, ms));
+
     /**
-     * Helper: submitAndCheckTransaction
-     * - If checkOnly === true -> simulate the signed tx to validate it (no submit)
-     * - If checkOnly === false -> submit to network and ensure success
-     * - Throws on failure
+     * Submit with retries for the transient RPC states.
+     *
+     * TRY_AGAIN_LATER means the RPC is congested and has NOT taken the
+     * transaction, so resubmitting the same XDR is safe. Network-level errors
+     * before a status is returned are retried the same way.
      */
-    const submitAndCheckTransaction = async (signedTxXdr: string, timeout = 30000, checkInterval = 1500) => {
-        const txObj = TransactionBuilder.fromXDR(signedTxXdr, networkPassphrase);
-
-        const result = await server.sendTransaction(txObj);
-
-        if (!result) {
-            throw new Error("Stellar submission failed: empty response");
-        }
-
-        if (result.status !== "PENDING") {
-            const raw = (result as any).errorResult ?? (result as any).errorResultXdr ?? result;
-            const detail = typeof raw === "string" ? raw : JSON.stringify(raw, bigIntReplacer);
-            console.error("Stellar submission rejected:", result);
-            throw new Error(`Stellar submission ${result.status}: ${detail}`);
-        }
-
-        const startTime = Date.now();
+    const sendWithRetry = async (txObj: any, attempts = 4) => {
         let lastErr: unknown = null;
 
-        while (Date.now() - startTime < timeout) {
-            await new Promise((res) => setTimeout(res, checkInterval));
+        for (let attempt = 0; attempt < attempts; attempt++) {
+            if (attempt > 0) await sleep(1500 * attempt);
 
             try {
-                const statusResponse = await server.getTransaction(result.hash);
-                if (statusResponse.status === "SUCCESS") {
-                    const txHash = (statusResponse as any).txHash ?? result.hash;
-                    return { success: true, result: { ...statusResponse, txHash } };
-                } else if (statusResponse.status === "FAILED") {
-                    throw new Error(`Stellar transaction failed: ${JSON.stringify(statusResponse)}`);
+                const result = await server.sendTransaction(txObj);
+
+                if (!result) {
+                    throw new Error("Stellar submission failed: empty response");
                 }
+                if (result.status === "TRY_AGAIN_LATER") {
+                    lastErr = new Error("Stellar submission TRY_AGAIN_LATER");
+                    console.warn(`RPC returned TRY_AGAIN_LATER (attempt ${attempt + 1}/${attempts}), retrying`);
+                    continue;
+                }
+                if (result.status !== "PENDING") {
+                    // DUPLICATE / ERROR are terminal - the transaction was rejected outright.
+                    const raw = (result as any).errorResult ?? (result as any).errorResultXdr ?? result;
+                    const detail = typeof raw === "string" ? raw : JSON.stringify(raw, bigIntReplacer);
+                    console.error("Stellar submission rejected:", result);
+                    throw new Error(`Stellar submission ${result.status}: ${detail}`);
+                }
+
+                return result;
             } catch (err) {
+                // A rejection carrying a status is terminal; anything else is
+                // an RPC/network blip worth retrying.
+                if (err instanceof Error && /Stellar submission (ERROR|DUPLICATE)/.test(err.message)) {
+                    throw err;
+                }
                 lastErr = err;
-                console.warn("Error querying tx status, retrying", err);
+                console.warn(`Submission attempt ${attempt + 1}/${attempts} failed, retrying`, err);
             }
         }
 
         throw new Error(
-            `Transaction did not complete within ${timeout}ms${lastErr ? `: ${lastErr}` : ""}`,
+            `Could not submit to the Soroban RPC after ${attempts} attempts${
+                lastErr instanceof Error ? `: ${lastErr.message}` : ""
+            }`,
         );
     };
 
+    /**
+     * Helper: submitAndCheckTransaction
+     * - Submits the signed transaction, then polls until the RPC reports a final status
+     * - SUCCESS / FAILED are terminal; NOT_FOUND and RPC errors are transient and retried
+     * - Exhausting the window throws TransactionPendingError (submitted, not yet confirmed)
+     *
+     * The window has to cover several ledger closes (~5-6s each) plus RPC indexing
+     * lag, which is where the old 30s budget kept expiring on a healthy transaction.
+     */
+    const submitAndCheckTransaction = async (signedTxXdr: string, timeout = 120000) => {
+        const txObj = TransactionBuilder.fromXDR(signedTxXdr, networkPassphrase);
+
+        const result = await sendWithRetry(txObj);
+
+        const startTime = Date.now();
+        let lastErr: unknown = null;
+        let consecutiveErrors = 0;
+
+        while (Date.now() - startTime < timeout) {
+            // Back off from 1s toward 5s so a slow RPC is not hammered, while a
+            // fast confirmation is still picked up promptly.
+            const elapsed = Date.now() - startTime;
+            await sleep(Math.min(1000 + Math.floor(elapsed / 10000) * 1000, 5000));
+
+            let statusResponse: Awaited<ReturnType<typeof server.getTransaction>>;
+            try {
+                statusResponse = await server.getTransaction(result.hash);
+                consecutiveErrors = 0;
+            } catch (err) {
+                // Transient: RPC unreachable, rate limited, or mid-restart.
+                lastErr = err;
+                consecutiveErrors += 1;
+                console.warn(
+                    `Error querying tx ${result.hash} (${consecutiveErrors} in a row), retrying`,
+                    err,
+                );
+                if (consecutiveErrors >= 8) {
+                    throw new TransactionPendingError(
+                        result.hash,
+                        Date.now() - startTime,
+                        explorerTxUrl(result.hash),
+                    );
+                }
+                continue;
+            }
+
+            // Terminal states are handled outside the try/catch on purpose: a
+            // FAILED transaction must surface its own error, not be swallowed
+            // by the retry handler and reported as a timeout.
+            if (statusResponse.status === "SUCCESS") {
+                const txHash = (statusResponse as any).txHash ?? result.hash;
+                return { success: true, result: { ...statusResponse, txHash } };
+            }
+
+            if (statusResponse.status === "FAILED") {
+                const reason =
+                    (statusResponse as any).resultXdr?.toString?.() ??
+                    JSON.stringify(statusResponse, bigIntReplacer);
+                throw new Error(`Stellar transaction failed: ${reason}`);
+            }
+
+            // NOT_FOUND: not in a closed ledger yet, or the RPC has not indexed
+            // it. Keep waiting.
+        }
+
+        console.warn(`Stopped polling ${result.hash} after ${timeout}ms`, lastErr);
+        throw new TransactionPendingError(result.hash, Date.now() - startTime, explorerTxUrl(result.hash));
+    };
+
+    /**
+     * Re-check a transaction the UI stopped waiting on.
+     * Returns null while the RPC still has no final answer.
+     */
+    const checkTransactionStatus = async (hash: string) => {
+        const statusResponse = await server.getTransaction(hash);
+
+        if (statusResponse.status === "SUCCESS") {
+            return { status: "SUCCESS" as const, txHash: (statusResponse as any).txHash ?? hash };
+        }
+        if (statusResponse.status === "FAILED") {
+            const reason =
+                (statusResponse as any).resultXdr?.toString?.() ??
+                JSON.stringify(statusResponse, bigIntReplacer);
+            return { status: "FAILED" as const, reason };
+        }
+        return null;
+    };
 
     /**
      * signProposal
@@ -491,6 +596,34 @@ export const StellarProvider: React.FC<{ children: React.ReactNode }> = ({
             console.error("Error executing proposal:", error);
             throw error;
         }
+    };
+
+    /**
+     * Finish an execution the UI stopped waiting on.
+     *
+     * When polling times out the transaction may still land, leaving the EVM
+     * record un-marked. Re-checking the hash and marking it here keeps the two
+     * sides from diverging without needing another signature or submission.
+     */
+    const confirmPendingExecution = async ({
+        multisigAddress,
+        proposalId,
+        hash,
+    }: {
+        multisigAddress: string;
+        proposalId: number;
+        hash: string;
+    }) => {
+        const status = await checkTransactionStatus(hash);
+
+        if (!status) return "PENDING" as const;
+
+        if (status.status === "SUCCESS") {
+            await markProposalExecuted(multisigAddress, proposalId, status.txHash);
+            return "SUCCESS" as const;
+        }
+
+        return "FAILED" as const;
     };
 
     /**
@@ -707,6 +840,8 @@ export const StellarProvider: React.FC<{ children: React.ReactNode }> = ({
                 fetchContractSpec,
                 buildInvokeTx,
                 createProposal,
+                checkTransactionStatus,
+                confirmPendingExecution,
                 createProposalToUpdateSigners,
                 createProposalToUpdateThreshold,
                 signProposal,

@@ -8,6 +8,8 @@ import { useStellar } from "@/context/StellarContext";
 import { useEffect, useState } from "react";
 import { X, Plus, Loader2 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+import { ErrorPanel } from "@/components/ErrorPanel";
+import { describeError, type FriendlyError } from "@/lib/errors";
 
 interface MultisigData {
   signers: string[];
@@ -25,6 +27,7 @@ export default function Settings() {
   const [threshold, setThreshold] = useState(2);
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
+  const [error, setError] = useState<FriendlyError | null>(null);
 
   useEffect(() => {
     if (!address) return;
@@ -51,10 +54,9 @@ export default function Settings() {
   const addSigner = () => {
     if (!newSigner.trim()) return;
     if (signers.includes(newSigner)) {
-      toast({
-        title: "Duplicate Signer",
-        description: "This address is already a signer",
-        variant: "destructive",
+      setError({
+        title: "Duplicate signer",
+        message: "That address is already a signer on this account.",
       });
       return;
     }
@@ -64,10 +66,9 @@ export default function Settings() {
 
   const removeSigner = (signer: string) => {
     if (signers.length <= 1) {
-      toast({
-        title: "Cannot Remove",
-        description: "At least one signer is required",
-        variant: "destructive",
+      setError({
+        title: "Cannot remove the last signer",
+        message: "At least one signer is required, otherwise the account becomes unusable.",
       });
       return;
     }
@@ -85,14 +86,15 @@ export default function Settings() {
     const hasThresholdChange = threshold !== multisigData.threshold;
 
     if (!hasSignerChanges && !hasThresholdChange) {
-      toast({
-        title: "No Changes Detected",
-        description: "Nothing to update",
-        variant: "destructive",
+      setError({
+        title: "No changes",
+        message: "The signer set and threshold match what is already on-chain.",
+        severity: "warning",
       });
       return;
     }
 
+    setError(null);
     setIsSaving(true);
     try {
       await createProposalToUpdateSigners({
@@ -106,12 +108,9 @@ export default function Settings() {
         title: "Signers Updated",
         description: "A proposal to update signers was created successfully",
       });
-    } catch (err: any) {
-      toast({
-        title: "Error",
-        description: err.message || "Operation failed",
-        variant: "destructive",
-      });
+    } catch (err) {
+      console.error("Error updating signers:", err);
+      setError(describeError(err, { account: address }));
     } finally {
       setIsSaving(false);
     }
@@ -196,6 +195,8 @@ export default function Settings() {
           </p>
         </CardContent>
       </Card>
+
+      <ErrorPanel error={error} onDismiss={() => setError(null)} />
 
       <Button
         onClick={handleSaveChanges}

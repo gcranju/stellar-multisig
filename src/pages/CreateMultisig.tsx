@@ -10,12 +10,16 @@ import { useEvm } from "@/context/EvmContext";
 import { Horizon, Keypair, TransactionBuilder, BASE_FEE, Operation } from "stellar-sdk";
 import { signTransaction } from "@stellar/freighter-api";
 import { useNavigate } from "react-router-dom";
+import { ErrorPanel } from "@/components/ErrorPanel";
+import { describeError, type FriendlyError } from "@/lib/errors";
+import { chainContext } from "@/lib/network";
 
 export default function CreateMultisig() {
   const [name, setName] = useState("");
   const [signers, setSigners] = useState<string[]>([""]);
   const [threshold, setThreshold] = useState(1);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [error, setError] = useState<FriendlyError | null>(null);
   const { toast } = useToast();
   const { walletAddress: userPublicKey, networkPassphrase } = useWallet();
   const { createMultisig } = useEvm();
@@ -45,31 +49,25 @@ export default function CreateMultisig() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
+    setError(null);
+
     if (!name.trim()) {
-      toast({
-        title: "Error",
-        description: "Please provide a name for the multisig account",
-        variant: "destructive",
-      });
+      setError({ title: "Name required", message: "Give the multisig account a name so it can be identified later." });
       return;
     }
 
     const validSigners = signers.filter((s) => s.trim() !== "");
 
     if (validSigners.length < 1) {
-      toast({
-        title: "Error",
-        description: "Please add at least one signer",
-        variant: "destructive",
-      });
+      setError({ title: "No signers", message: "Add at least one signer address before creating the account." });
       return;
     }
 
     if (threshold < 1 || threshold > validSigners.length) {
-      toast({
-        title: "Error",
-        description: "Threshold must be between 1 and number of signers",
-        variant: "destructive",
+      setError({
+        title: "Threshold out of range",
+        message: `The threshold must be between 1 and ${validSigners.length}.`,
+        hint: "A threshold above the signer count would make the account permanently unusable.",
       });
       return;
     }
@@ -137,12 +135,9 @@ export default function CreateMultisig() {
         description: `${name}: ${multisigPublicKey}`,
       });
       navigate(`/multisig/${multisigPublicKey}`);
-    } catch (error) {
-      toast({
-        title: "Error",
-        description: error instanceof Error ? error.message : "Failed to create multisig",
-        variant: "destructive",
-      });
+    } catch (err) {
+      console.error("Error creating multisig:", err);
+      setError(describeError(err, chainContext(networkPassphrase)));
     } finally {
       setIsSubmitting(false);
     }
@@ -237,6 +232,8 @@ export default function CreateMultisig() {
                 </p>
               </div>
             </div>
+
+            <ErrorPanel error={error} onDismiss={() => setError(null)} />
 
             <Button type="submit" size="lg" className="w-full" disabled={isSubmitting}>
               {isSubmitting ? (

@@ -10,6 +10,9 @@ import { useEffect, useState } from "react";
 import { ArrowLeft, CheckCircle2, Clock, Loader2, Shield } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { TransactionBuilder, Transaction } from "@stellar/stellar-sdk";
+import { ErrorPanel } from "@/components/ErrorPanel";
+import { describeError, TransactionPendingError, type FriendlyError } from "@/lib/errors";
+import { chainContext } from "@/lib/network";
 
 interface DecodedTransaction {
   source: string;
@@ -27,7 +30,13 @@ export default function TransactionDetail() {
   const { address, proposalId } = useParams();
   const navigate = useNavigate();
   const { getProposal, deleteProposal } = useEvm();
-  const { networkPassphrase, signAndExecuteProposal, signProposal, fetchSignersAndThresholds } = useStellar();
+  const {
+    networkPassphrase,
+    signAndExecuteProposal,
+    signProposal,
+    fetchSignersAndThresholds,
+    confirmPendingExecution,
+  } = useStellar();
   const { walletAddress } = useWallet();
   const { toast } = useToast();
   const [multisigData, setMultisigData] = useState<MultisigData | null>(null);
@@ -38,6 +47,16 @@ export default function TransactionDetail() {
   const [isExecuting, setIsExecuting] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [approvalCount, setApprovalCount] = useState(0);
+  const [error, setError] = useState<FriendlyError | null>(null);
+  // Hash of a submitted transaction the RPC had not confirmed before we stopped polling.
+  const [pendingHash, setPendingHash] = useState<string | null>(null);
+  const [isChecking, setIsChecking] = useState(false);
+
+  /** Network + explorer rows attached to every error this page reports. */
+  const errorContext = () => ({
+    ...chainContext(networkPassphrase),
+    account: address,
+  });
 
   useEffect(() => {
     if (!address || !proposalId) return;
@@ -66,21 +85,20 @@ export default function TransactionDetail() {
               fee: tx.fee,
               sequenceNumber: tx.sequence,
             });
-          } catch {
-            toast({
-              title: "Error",
-              description: "Failed to decode transaction XDR",
-              variant: "destructive",
+          } catch (err) {
+            console.error("Error decoding transaction XDR:", err);
+            setError({
+              title: "Could not decode XDR",
+              message: "The stored envelope could not be parsed, so the operation summary is unavailable.",
+              hint: "The proposal itself is unaffected - it can still be signed and executed.",
+              severity: "warning",
             });
           }
         }
-      } catch (error) {
+      } catch (err) {
         if (cancelled) return;
-        toast({
-          title: "Error",
-          description: "Failed to load transaction details",
-          variant: "destructive",
-        });
+        console.error("Error loading transaction details:", err);
+        setError(describeError(err, { ...chainContext(networkPassphrase), account: address }));
       } finally {
         if (!cancelled) setIsLoading(false);
       }
@@ -93,6 +111,7 @@ export default function TransactionDetail() {
 
   const handleApprove = async () => {
     if (!proposal || !address || !proposalId) return;
+    setError(null);
     setIsApproving(true);
     try {
       await signProposal({
@@ -108,12 +127,9 @@ export default function TransactionDetail() {
       }
 
       toast({ title: "Success", description: "Transaction approved" });
-    } catch (error) {
-      toast({
-        title: "Error",
-        description: "Failed to approve transaction",
-        variant: "destructive",
-      });
+    } catch (err) {
+      console.error("Error approving transaction:", err);
+      setError(describeError(err, errorContext()));
     } finally {
       setIsApproving(false);
     }
@@ -121,17 +137,15 @@ export default function TransactionDetail() {
 
   const handleDelete = async () => {
     if (!proposal || !address || !proposalId) return;
+    setError(null);
     setIsDeleting(true);
     try {
       await deleteProposal(address, parseInt(proposalId));
       toast({ title: "Success", description: "Proposal deleted" });
       navigate(`/multisig/${address}/transactions`);
-    } catch (error) {
-      toast({
-        title: "Error",
-        description: "Failed to delete proposal",
-        variant: "destructive",
-      });
+    } catch (err) {
+      console.error("Error deleting proposal:", err);
+      setError(describeError(err, errorContext()));
     } finally {
       setIsDeleting(false);
     }
@@ -140,6 +154,8 @@ export default function TransactionDetail() {
   const handleExecute = async () => {
     if (!proposal || !multisigData || !address || !proposalId) return;
     setIsExecuting(true);
+    setError(null);
+    setPendingHash(null);
     try {
       const shouldSign = proposal.signers.signedSigners.length < multisigData.threshold;
       await signAndExecuteProposal({
@@ -151,14 +167,53 @@ export default function TransactionDetail() {
       });
       toast({ title: "Success", description: "Transaction executed successfully" });
       navigate(`/multisig/${address}/transactions`);
-    } catch (error) {
-      toast({
-        title: "Error",
-        description: "Failed to execute transaction",
-        variant: "destructive",
-      });
+    } catch (err) {
+      console.error("Error executing proposal:", err);
+      // Submitted but unconfirmed: keep the hash so the user can re-check
+      // instead of re-signing a transaction that may already have landed.
+      if (err instanceof TransactionPendingError) {
+        setPendingHash(err.hash);
+      }
+      setError(describeError(err, errorContext()));
     } finally {
       setIsExecuting(false);
+    }
+  };
+
+  /** Re-check a transaction whose confirmation we stopped waiting for. */
+  const handleCheckPending = async () => {
+    if (!pendingHash || !address || !proposalId) return;
+    setIsChecking(true);
+    try {
+      const outcome = await confirmPendingExecution({
+        multisigAddress: address,
+        proposalId: parseInt(proposalId),
+        hash: pendingHash,
+      });
+
+      if (outcome === "SUCCESS") {
+        setError(null);
+        setPendingHash(null);
+        toast({ title: "Confirmed", description: "The transaction was included and is now marked executed" });
+        navigate(`/multisig/${address}/transactions`);
+      } else if (outcome === "FAILED") {
+        setPendingHash(null);
+        setError({
+          title: "Transaction failed",
+          message: "The transaction was included in a ledger but the contract call failed.",
+          hint: "Nothing changed on-chain. Review the arguments and create a new proposal.",
+        });
+      } else {
+        toast({
+          title: "Still pending",
+          description: "The RPC has no final status yet. Try again in a few seconds.",
+        });
+      }
+    } catch (err) {
+      console.error("Error checking transaction status:", err);
+      setError(describeError(err, errorContext()));
+    } finally {
+      setIsChecking(false);
     }
   };
 
@@ -192,11 +247,15 @@ export default function TransactionDetail() {
           <ArrowLeft className="w-4 h-4" />
           Back to Transactions
         </Button>
-        <Card>
-          <CardContent className="text-center py-12">
-            <p className="text-lg text-muted-foreground">Transaction not found</p>
-          </CardContent>
-        </Card>
+        {error ? (
+          <ErrorPanel error={error} onDismiss={() => setError(null)} />
+        ) : (
+          <Card>
+            <CardContent className="text-center py-12">
+              <p className="text-lg text-muted-foreground">Transaction not found</p>
+            </CardContent>
+          </Card>
+        )}
       </div>
     );
   }
@@ -331,9 +390,27 @@ export default function TransactionDetail() {
                     )}
                   </Button>
 
+                  {pendingHash && (
+                    <Button
+                      onClick={handleCheckPending}
+                      disabled={isChecking}
+                      className="w-full"
+                      variant="secondary"
+                    >
+                      {isChecking ? (
+                        <>
+                          <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                          Checking...
+                        </>
+                      ) : (
+                        "Check status"
+                      )}
+                    </Button>
+                  )}
+
                   <Button
                     onClick={handleExecute}
-                    disabled={!thresholdReached || isExecuting}
+                    disabled={!thresholdReached || isExecuting || !!pendingHash}
                     className="w-full"
                   >
                     {isExecuting ? (
@@ -345,6 +422,8 @@ export default function TransactionDetail() {
                       "Execute Transaction"
                     )}
                   </Button>
+
+                  <ErrorPanel error={error} onDismiss={() => setError(null)} />
 
                   {!thresholdReached && (
                     <p className="text-xs text-center text-muted-foreground">
