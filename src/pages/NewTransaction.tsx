@@ -9,6 +9,9 @@ import { useToast } from "@/hooks/use-toast";
 import { useStellar } from "@/context/StellarContext";
 import { Loader2 } from "lucide-react";
 import { useNavigate, useParams } from "react-router-dom";
+import { ErrorPanel } from "@/components/ErrorPanel";
+import { cn } from "@/lib/utils";
+import { describeError, type FriendlyError } from "@/lib/errors";
 
 export default function NewContractTransaction() {
   const [destination, setDestination] = useState("");
@@ -18,6 +21,7 @@ export default function NewContractTransaction() {
   const [isLoading, setIsLoading] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [jsonSchema, setJsonSchema] = useState(null);
+  const [error, setError] = useState<FriendlyError | null>(null);
   const { toast } = useToast();
   const { address } = useParams();
   const navigate = useNavigate();
@@ -31,14 +35,15 @@ export default function NewContractTransaction() {
 
   const loadContractSpec = async (contractId) => {
     setIsLoading(true);
+    setError(null);
     try {
       const { jsonSchema: schema } = await fetchContractSpec(contractId);
       
       if (!schema || !schema.definitions) {
-        toast({
-          title: "No Schema Found",
-          description: "Could not retrieve contract schema",
-          variant: "destructive"
+        setError({
+          title: "No interface found",
+          message: "This contract did not expose a spec, so its functions cannot be listed.",
+          hint: "Contracts built without an embedded spec must be invoked with a hand-built XDR.",
         });
         setIsLoading(false);
         return;
@@ -72,13 +77,9 @@ export default function NewContractTransaction() {
         title: "Contract Loaded",
         description: `Found ${functionList.length} functions`,
       });
-    } catch (error) {
-      console.error("Error fetching contract spec:", error);
-      toast({
-        title: "Error",
-        description: error.message || "Failed to fetch contract specification",
-        variant: "destructive"
-      });
+    } catch (err) {
+      console.error("Error fetching contract spec:", err);
+      setError(describeError(err));
     } finally {
       setIsLoading(false);
     }
@@ -88,6 +89,8 @@ export default function NewContractTransaction() {
     const value = e.target.value;
     setDestination(value);
     
+    setError(null);
+
     if (isValidContractId(value)) {
       loadContractSpec(value);
     } else {
@@ -102,6 +105,7 @@ export default function NewContractTransaction() {
 
   const handleFunctionChange = (funcName) => {
     setSelectedFunction(funcName);
+    setError(null);
     const func = functions.find((f) => f.name === funcName);
     setParams(
       func
@@ -145,11 +149,12 @@ export default function NewContractTransaction() {
   const handleSubmit = async (e) => {
     e.preventDefault();
 
+    setError(null);
+
     if (!destination || !selectedFunction) {
-      toast({
-        title: "Error",
-        description: "Please fill in required fields",
-        variant: "destructive",
+      setError({
+        title: "Incomplete proposal",
+        message: "Choose a contract and a function before creating a proposal.",
       });
       return;
     }
@@ -160,10 +165,13 @@ export default function NewContractTransaction() {
       .map(p => p.name);
 
     if (missingParams.length > 0) {
-      toast({
-        title: "Missing Required Parameters",
-        description: `Please fill in: ${missingParams.join(", ")}`,
-        variant: "destructive",
+      setError({
+        title: "Missing required arguments",
+        message:
+          missingParams.length === 1
+            ? `"${missingParams[0]}" needs a value.`
+            : `These arguments need values: ${missingParams.join(", ")}.`,
+        field: missingParams[0],
       });
       return;
     }
@@ -201,13 +209,9 @@ export default function NewContractTransaction() {
       setFunctions([]);
       setJsonSchema(null);
       navigate(`/multisig/${address}/transactions`);
-    } catch (error) {
-      console.error("Error creating proposal:", error);
-      toast({
-        title: "Error",
-        description: error.message || "Failed to generate transaction XDR",
-        variant: "destructive",
-      });
+    } catch (err) {
+      console.error("Error creating proposal:", err);
+      setError(describeError(err));
     } finally {
       setIsSubmitting(false);
     }
@@ -281,10 +285,16 @@ export default function NewContractTransaction() {
                             type={getInputType(param.schema)}
                             placeholder={getInputPlaceholder(param.schema)}
                             value={params[param.name] || ""}
-                            onChange={(e) =>
-                              setParams({ ...params, [param.name]: e.target.value })
-                            }
-                            className="font-mono text-sm"
+                            onChange={(e) => {
+                              if (error?.field === param.name) setError(null);
+                              setParams({ ...params, [param.name]: e.target.value });
+                            }}
+                            aria-invalid={error?.field === param.name}
+                            className={cn(
+                              "font-mono text-sm",
+                              error?.field === param.name &&
+                                "border-destructive focus-visible:ring-destructive"
+                            )}
                             disabled={isSubmitting}
                           />
                         )}
@@ -292,6 +302,8 @@ export default function NewContractTransaction() {
                     ))}
               </>
             )}
+
+            <ErrorPanel error={error} onDismiss={() => setError(null)} />
 
             <Button onClick={handleSubmit} className="w-full" disabled={isLoading || isSubmitting}>
               {isSubmitting ? (

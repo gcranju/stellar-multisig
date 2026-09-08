@@ -16,6 +16,7 @@ import { useWallet } from "@/context/WalletContext";
 import { signTransaction } from "@stellar/freighter-api";
 import { useEvm } from "./EvmContext";
 import { Buffer } from "buffer";
+import { ContractParamError } from "@/lib/errors";
 import { Horizon } from "stellar-sdk";
 
 type FetchClientResult = {
@@ -128,9 +129,10 @@ export const StellarProvider: React.FC<{ children: React.ReactNode }> = ({
     }
 
     /**
-     * convertToScVal
+     * Argument coercion + validation helpers.
+     * Each throws a ContractParamError naming the offending argument.
      */
-    function toBool(value: any) {
+    function toBool(value: any, field?: string) {
         if (typeof value === "boolean") return value;
         if (typeof value === "string") {
             const normalized = value.trim().toLowerCase();
@@ -138,69 +140,125 @@ export const StellarProvider: React.FC<{ children: React.ReactNode }> = ({
             if (normalized === "" || normalized === "false" || normalized === "0") return false;
         }
         if (typeof value === "number") return value !== 0;
-        throw new Error(`Invalid boolean value: ${value}`);
+
+        throw new ContractParamError(`"${value}" is not a boolean.`, {
+            field,
+            hint: 'Accepted values are true/false, 1/0, or the toggle in the form.',
+        });
     }
 
-    function convertToScVal(value: any, typeDef: any) {
+    function toIntegerString(value: any, type: string, field?: string) {
+        const text = String(value).trim();
+        const signed = type.startsWith("i");
+        const pattern = signed ? /^-?\d+$/ : /^\d+$/;
+
+        if (!pattern.test(text)) {
+            throw new ContractParamError(`"${value}" is not a valid ${type}.`, {
+                field,
+                hint: signed
+                    ? "Enter a whole number, optionally negative - no decimals, spaces, or units."
+                    : `Enter a whole non-negative number - ${type} cannot be negative or fractional.`,
+            });
+        }
+        return text;
+    }
+
+    function toBytes(value: any, field?: string) {
+        const hex = String(value).trim().replace(/^0x/i, "");
+
+        if (hex.length === 0) {
+            throw new ContractParamError("Byte values cannot be empty.", {
+                field,
+                hint: "Enter hex, e.g. 0x1234abcd.",
+            });
+        }
+        if (hex.length % 2 !== 0 || !/^[0-9a-f]+$/i.test(hex)) {
+            throw new ContractParamError(`"${value}" is not valid hex.`, {
+                field,
+                hint: "Use an even number of hex digits (0-9, a-f), optionally 0x-prefixed.",
+            });
+        }
+        return Buffer.from(hex, "hex");
+    }
+
+    function toAddress(value: any, field?: string) {
+        const text = String(value).trim();
+
+        if (!/^[GC][A-Z2-7]{55}$/.test(text)) {
+            throw new ContractParamError(`"${value}" is not a valid Stellar address.`, {
+                field,
+                hint: "Expected a 56-character account (G...) or contract (C...) address.",
+            });
+        }
+        return text;
+    }
+
+    /**
+     * Convert a single argument to an ScVal, using the contract's JSON schema.
+     * Every failure is raised as a ContractParamError carrying the argument name,
+     * so the form can point at the offending input instead of showing SDK internals.
+     */
+    function convertToScVal(value: any, typeDef: any, field?: string) {
         // Soroban JSON schemas express bools as { type: "boolean" } (no $ref),
         // so check that before the $ref switch below.
         if (typeDef?.type === "boolean") {
-            return nativeToScVal(toBool(value), { type: "bool" });
+            return nativeToScVal(toBool(value, field), { type: "bool" });
         }
 
-        if (typeDef?.$ref) {
-            const refType = typeDef.$ref.split("/").pop();
+        const refType = typeDef?.$ref ? typeDef.$ref.split("/").pop() : null;
 
+        try {
             switch (refType) {
                 case "Address":
-                    return nativeToScVal(value, { type: "address" });
+                    return nativeToScVal(toAddress(value, field), { type: "address" });
 
                 case "U128":
                 case "u128":
-                    return nativeToScVal(value, { type: "u128" });
-
                 case "U64":
                 case "u64":
-                    return nativeToScVal(value, { type: "u64" });
-
                 case "U32":
                 case "u32":
-                    return nativeToScVal(value, { type: "u32" });
-
                 case "I128":
                 case "i128":
-                    return nativeToScVal(value, { type: "i128" });
-
                 case "I64":
                 case "i64":
-                    return nativeToScVal(value, { type: "i64" });
-
                 case "I32":
-                case "i32":
-                    return nativeToScVal(value, { type: "i32" });
+                case "i32": {
+                    const type = refType.toLowerCase();
+                    return nativeToScVal(toIntegerString(value, type, field), { type } as any);
+                }
 
                 case "DataUrl":
                 case "Bytes":
                 case "bytes":
-                    // Expect hex string - convert to Buffer
-                    const bytes = Buffer.from(value, "hex");
-                    return nativeToScVal(bytes, { type: "bytes" });
+                    return nativeToScVal(toBytes(value, field), { type: "bytes" });
 
                 case "String":
                 case "string":
-                    return nativeToScVal(value, { type: "string" });
+                    return nativeToScVal(String(value), { type: "string" });
 
                 case "Bool":
                 case "bool":
                 case "boolean":
-                    return nativeToScVal(toBool(value), { type: "bool" });
+                    return nativeToScVal(toBool(value, field), { type: "bool" });
 
                 default:
                     return nativeToScVal(value);
             }
-        }
+        } catch (err) {
+            // Our own validation errors already carry a good message; only wrap
+            // the SDK's raw ones ("invalid type (u32) specified for string value").
+            if (err instanceof ContractParamError) throw err;
 
-        return nativeToScVal(value);
+            throw new ContractParamError(
+                `Could not encode ${refType ? `this ${refType} value` : "this value"}.`,
+                {
+                    field,
+                    hint: err instanceof Error ? err.message : undefined,
+                    cause: err,
+                },
+            );
+        }
     }
 
     /**
@@ -212,12 +270,19 @@ export const StellarProvider: React.FC<{ children: React.ReactNode }> = ({
         for (const [paramName, typeDef] of Object.entries(methodSchema || {})) {
             const value = args[paramName];
 
-            if (value === undefined || value === null) {
-                throw new Error(`Missing required parameter: ${paramName}`);
+            // An empty string is a legitimate value for a string argument, but for
+            // every other type it means the field was left blank.
+            const isStringType =
+                typeDef?.type === "string" || /\/(String|string)$/.test((typeDef as any)?.$ref ?? "");
+
+            if (value === undefined || value === null || (value === "" && !isStringType)) {
+                throw new ContractParamError(`"${paramName}" is required.`, {
+                    field: paramName,
+                    hint: "Fill in every argument before creating the proposal.",
+                });
             }
 
-            const scVal = convertToScVal(value, typeDef);
-            params.push(scVal);
+            params.push(convertToScVal(value, typeDef, paramName));
         }
 
         return params;
