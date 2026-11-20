@@ -17,6 +17,7 @@ import { EvmProvider } from "@/context/EvmContext";
 import MultisigPage from "./pages/MultisigPage";
 import { StellarProvider } from "./context/StellarContext";
 import TransactionDetail from "./pages/TransactionDetail";
+import LaunchTokens from "./pages/LaunchTokens";
 import { Wallet } from "lucide-react";
 
 const queryClient = new QueryClient();
@@ -55,6 +56,7 @@ const AppContent = () => {
             <Route path="/multisig/:address" element={<MultisigPage />} />
             <Route path="/create-multisig" element={<CreateMultisig />} />
             <Route path="/multisig/:address/new-transaction" element={<NewTransaction />} />
+            <Route path="/multisig/:address/launch-tokens" element={<LaunchTokens />} />
             <Route path="/multisig/:address/transactions" element={<Transactions />} />
             <Route path="/multisig/:address/transactions/:proposalId" element={<TransactionDetail />} />
             <Route path="/multisig/:address/settings" element={<Settings />} />

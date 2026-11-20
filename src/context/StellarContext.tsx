@@ -11,6 +11,8 @@ import {
     contract as contractModule,
     Contract,
     nativeToScVal,
+    Asset,
+    Memo,
 } from "@stellar/stellar-sdk";
 import { useWallet } from "@/context/WalletContext";
 import { signTransaction } from "@stellar/freighter-api";
@@ -32,6 +34,26 @@ type CreateProposalParams = {
     schema?: any;
     source: string;
 };
+
+/** One token in a launch batch: `code` is issued by the multisig, `amount` in whole units (up to 7 decimals). */
+export type LaunchToken = {
+    code: string;
+    amount: string;
+    recipient: string;
+};
+
+export type LaunchTokenStatus = {
+    code: string;
+    contractId: string;
+    sacDeployed: boolean;
+    /** null when the recipient account does not exist. */
+    recipientHasTrustline: boolean | null;
+    /** Circulating supply Horizon reports, "0" for an asset never issued. */
+    issuedSupply: string;
+};
+
+/** Stellar caps a transaction at 100 operations, one payment per token. */
+export const MAX_LAUNCH_TOKENS = 100;
 
 type StellarContextProps = {
     server: rpc.Server;
@@ -56,6 +78,12 @@ type StellarContextProps = {
         threshold: number;
 
     }) => Promise<any>;
+    inspectLaunchTokens: (issuer: string, tokens: LaunchToken[]) => Promise<LaunchTokenStatus[]>;
+    deployAssetContract: (code: string, issuer: string) => Promise<string>;
+    createProposalToLaunchTokens: (params: {
+        source: string;
+        tokens: LaunchToken[];
+    }) => Promise<any>;
     signProposal: (options: {
         multisigAddress: string;
         proposalId: number;
@@ -70,6 +98,10 @@ type StellarContextProps = {
         sign?: boolean;
     }) => Promise<void>;
     fetchSignersAndThresholds: (accountId: string) => Promise<{
+        signers: string[];
+        threshold: number
+    }>;
+    fetchAccountSigners: (accountId: string) => Promise<{
         signers: string[];
         threshold: number
     }>;
@@ -144,6 +176,16 @@ export const StellarProvider: React.FC<{ children: React.ReactNode }> = ({
             console.error("Error fetching account details:", error);
             throw error;
         }
+    }
+
+    /**
+     * Every key that can sign for the account, including the master key when it
+     * still has weight (an existing account turned multisig, such as an issuer).
+     */
+    async function fetchAccountSigners(accountId: string) {
+        const account = await horizonServer.loadAccount(accountId);
+        const signers = account.signers.filter((s) => s.weight > 0).map((s) => s.key);
+        return { signers, threshold: account.thresholds.high_threshold };
     }
 
     /**
@@ -290,8 +332,8 @@ export const StellarProvider: React.FC<{ children: React.ReactNode }> = ({
 
             // An empty string is a legitimate value for a string argument, but for
             // every other type it means the field was left blank.
-            const isStringType =
-                typeDef?.type === "string" || /\/(String|string)$/.test((typeDef as any)?.$ref ?? "");
+            const { type, $ref } = (typeDef ?? {}) as { type?: string; $ref?: string };
+            const isStringType = type === "string" || /\/(String|string)$/.test($ref ?? "");
 
             if (value === undefined || value === null || (value === "" && !isStringType)) {
                 throw new ContractParamError(`"${paramName}" is required.`, {
@@ -925,6 +967,191 @@ export const StellarProvider: React.FC<{ children: React.ReactNode }> = ({
         }
     };
 
+    /**
+     * inspectLaunchTokens
+     * - For each token: is its Stellar Asset Contract deployed, does the recipient
+     *   trust the asset, and how much is already issued
+     * - A payment to a recipient without the trustline fails the whole batch, so the
+     *   launch page blocks on that before a proposal is created
+     */
+    const inspectLaunchTokens = async (issuer: string, tokens: LaunchToken[]) => {
+        const recipients = [...new Set(tokens.map((t) => t.recipient))];
+        type Balance = { asset_code?: string; asset_issuer?: string };
+        const balancesByRecipient = new Map<string, Balance[] | null>();
+
+        await Promise.all(
+            recipients.map(async (recipient) => {
+                try {
+                    const account = await horizonServer.loadAccount(recipient);
+                    balancesByRecipient.set(recipient, account.balances as Balance[]);
+                } catch (err) {
+                    const e = err as { response?: { status?: number }; status?: number };
+                    const status = e?.response?.status ?? e?.status;
+                    if (status === 404) {
+                        balancesByRecipient.set(recipient, null);
+                        return;
+                    }
+                    throw err;
+                }
+            }),
+        );
+
+        return Promise.all(
+            tokens.map(async (token) => {
+                const contractId = new Asset(token.code, issuer).contractId(networkPassphrase);
+
+                let sacDeployed = true;
+                try {
+                    await server.getContractData(
+                        contractId,
+                        xdr.ScVal.scvLedgerKeyContractInstance(),
+                        rpc.Durability.Persistent,
+                    );
+                } catch {
+                    sacDeployed = false;
+                }
+
+                const balances = balancesByRecipient.get(token.recipient);
+                const recipientHasTrustline =
+                    balances === null || balances === undefined
+                        ? null
+                        : balances.some(
+                              (b) => b.asset_code === token.code && b.asset_issuer === issuer,
+                          );
+
+                let issuedSupply = "0";
+                try {
+                    const page = await horizonServer
+                        .assets()
+                        .forCode(token.code)
+                        .forIssuer(issuer)
+                        .call();
+                    const record = page.records[0] as
+                        | {
+                              balances?: { authorized?: string; authorized_to_maintain_liabilities?: string };
+                              contracts_amount?: string;
+                              claimable_balances_amount?: string;
+                              liquidity_pools_amount?: string;
+                          }
+                        | undefined;
+                    if (record) {
+                        // Supply held by contracts (e.g. the asset manager) is reported apart from trustlines.
+                        const parts = [
+                            record.balances?.authorized,
+                            record.balances?.authorized_to_maintain_liabilities,
+                            record.contracts_amount,
+                            record.claimable_balances_amount,
+                            record.liquidity_pools_amount,
+                        ];
+                        const stroops = parts.reduce(
+                            (sum, part) => sum + BigInt(Math.round(Number(part ?? "0") * 1e7)),
+                            0n,
+                        );
+                        issuedSupply = (Number(stroops) / 1e7).toString();
+                    }
+                } catch (err) {
+                    console.warn(`Could not read supply for ${token.code}`, err);
+                }
+
+                return { code: token.code, contractId, sacDeployed, recipientHasTrustline, issuedSupply };
+            }),
+        );
+    };
+
+    /**
+     * deployAssetContract
+     * - Deploys the Stellar Asset Contract for CODE:issuer from the connected wallet
+     * - Permissionless: the issuer does not sign, so this is a plain transaction,
+     *   not a proposal. Soroban allows one such operation per transaction.
+     */
+    const deployAssetContract = async (code: string, issuer: string) => {
+        if (!walletAddress) {
+            throw new Error("Wallet not connected");
+        }
+
+        const account = await server.getAccount(walletAddress);
+        const tx = new TransactionBuilder(account, {
+            fee: BASE_FEE,
+            networkPassphrase,
+        })
+            .addOperation(Operation.createStellarAssetContract({ asset: new Asset(code, issuer) }))
+            .setTimeout(180)
+            .build();
+
+        const preparedTx = await server.prepareTransaction(tx);
+        const signedXdr = await safeSignTransaction(preparedTx.toXDR());
+        const { result } = await submitAndCheckTransaction(signedXdr);
+
+        return result.txHash as string;
+    };
+
+    /**
+     * createProposalToLaunchTokens
+     * - One classic transaction from the issuer multisig with a payment per token;
+     *   a payment from the issuer mints that amount to the recipient
+     * - Safe sign, then commit to EVM (classic only, so no simulation step)
+     */
+    const createProposalToLaunchTokens = async ({
+        source,
+        tokens,
+    }: {
+        source: string;
+        tokens: LaunchToken[];
+    }) => {
+        if (!walletAddress) {
+            throw new Error("Wallet not connected");
+        }
+        if (tokens.length === 0) {
+            throw new Error("Add at least one token to launch");
+        }
+        if (tokens.length > MAX_LAUNCH_TOKENS) {
+            throw new Error(`A launch can hold at most ${MAX_LAUNCH_TOKENS} tokens`);
+        }
+
+        try {
+            const account = await server.getAccount(source);
+
+            const now = Math.floor(Date.now() / 1000);
+            const twoDays = 2 * 24 * 60 * 60;
+            const maxTime = now + twoDays;
+
+            // The base fee is per operation; 100 stroops loses surge-pricing auctions,
+            // and a 100-op launch at 10,000 stroops still costs only 0.1 XLM.
+            const txBuilder = new TransactionBuilder(account, {
+                fee: "10000",
+                networkPassphrase,
+                timebounds: { minTime: 0, maxTime },
+            });
+
+            tokens.forEach((token) => {
+                txBuilder.addOperation(
+                    Operation.payment({
+                        destination: token.recipient,
+                        asset: new Asset(token.code, source),
+                        amount: token.amount,
+                    }),
+                );
+            });
+
+            const codes = tokens.map((t) => t.code);
+            // Text memos cap at 28 bytes.
+            txBuilder.addMemo(Memo.text(`launch ${codes.length} token${codes.length === 1 ? "" : "s"}`));
+
+            const tx = txBuilder.build();
+            const signedXdr = await safeSignTransaction(tx.toXDR());
+
+            await createProposalEvm(source, signedXdr, `launch_tokens: ${codes.join(", ")}`, walletAddress);
+
+            return {
+                xdr: signedXdr,
+                transaction: tx,
+            };
+        } catch (error) {
+            console.error("Error creating launch proposal:", error);
+            throw error;
+        }
+    };
+
     return (
         <StellarContext.Provider
             value={{
@@ -940,9 +1167,13 @@ export const StellarProvider: React.FC<{ children: React.ReactNode }> = ({
                 reconcileProposalExecution,
                 createProposalToUpdateSigners,
                 createProposalToUpdateThreshold,
+                inspectLaunchTokens,
+                deployAssetContract,
+                createProposalToLaunchTokens,
                 signProposal,
                 signAndExecuteProposal,
                 fetchSignersAndThresholds,
+                fetchAccountSigners,
             }}
         >
             {children}
