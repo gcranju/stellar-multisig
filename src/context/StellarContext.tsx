@@ -162,16 +162,9 @@ export const StellarProvider: React.FC<{ children: React.ReactNode }> = ({
 
     async function fetchSignersAndThresholds(accountId: string) {
         try {
-            const account = await horizonServer.loadAccount(accountId);
-
-            // Get signers
-            const signers = account.signers.map((s) => s.key).filter(
-                (key) => key !== accountId // Exclude master key if present
-            );
-
-            const threshold = account.thresholds.high_threshold;
-
-            return { signers, threshold };
+            // Includes the master key while it still has weight (an existing
+            // account turned multisig, such as an issuer); weight-0 keys can't sign.
+            return await fetchAccountSigners(accountId);
         } catch (error) {
             console.error("Error fetching account details:", error);
             throw error;
