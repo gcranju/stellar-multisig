@@ -182,6 +182,8 @@ export const EvmProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!contract) return null;
     try { 
       const multisig = await contract.getMultisig(stellarAddress);
+      // The registry returns an empty record, not a revert, for unknown accounts.
+      if (Number(multisig.threshold) === 0) return null;
       return {
         name: multisig.name,
         threshold: Number(multisig.threshold),

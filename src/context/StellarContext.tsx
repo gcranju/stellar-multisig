@@ -140,7 +140,7 @@ export const StellarProvider: React.FC<{ children: React.ReactNode }> = ({
     );
 
     const wallet = useWallet();
-    const { createProposalEvm, signProposalEvm, markProposalExecuted } = useEvm();
+    const { createProposalEvm, signProposalEvm, markProposalExecuted, getProposals } = useEvm();
     const walletAddress = wallet?.walletAddress;
     const network = wallet?.network;
     const networkPassphrase = wallet?.networkPassphrase ?? Networks.PUBLIC;
@@ -1141,6 +1141,12 @@ export const StellarProvider: React.FC<{ children: React.ReactNode }> = ({
             const signedXdr = await safeSignTransaction(tx.toXDR());
 
             await createProposalEvm(source, signedXdr, `launch_tokens: ${codes.join(", ")}`, walletAddress);
+
+            // createProposalEvm logs instead of throwing, so confirm the record landed.
+            const stored = await getProposals(source);
+            if (!stored.some((p) => p.xdr === signedXdr)) {
+                throw new Error("The registry did not record the proposal. Check the console for the EVM error.");
+            }
 
             return {
                 xdr: signedXdr,
